@@ -6,20 +6,14 @@ export async function POST(req: Request) {
     const token = process.env.APIFY_TOKEN || "";
     const geminiKey = process.env.GEMINI_API_KEY || "";
 
-    // ВЫВОДИМ В ЛОГИ ПРОВЕРКУ ТOКЕНА
-    console.log("--- DEBUG START ---");
-    console.log("Token Length:", token.length);
-    if (token.length > 8) {
-      console.log(`Token Check: ${token.substring(0, 4)}...${token.substring(token.length - 4)}`);
-    } else {
-      console.log("Token Check: TOO SHORT OR EMPTY!");
-    }
-
     const idMatch = url.match(/\d{10,}/); 
     const pageId = idMatch ? idMatch[0] : url;
 
-    // Прямой вызов официального скрапера
-    const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}`;
+    console.log("--- ATTEMPTING CONNECTION ---");
+    console.log("Targeting ID:", pageId);
+
+    // ВНИМАНИЕ: Исправленный адрес (убрали слово library, как на твоем скрине!)
+    const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}`;
 
     const res = await fetch(apifyUrl, {
       method: 'POST',
@@ -33,14 +27,10 @@ export async function POST(req: Request) {
       })
     });
 
-    console.log("Apify Status:", res.status);
-
-    if (res.status === 404) {
+    if (!res.ok) {
       const errorBody = await res.text();
-      console.error("Apify Body Error:", errorBody);
-      return NextResponse.json({ 
-        error: `404: Scraper not found. Verify your Token matches the account where you added the scraper.` 
-      }, { status: 404 });
+      console.error("Apify Error Body:", errorBody);
+      return NextResponse.json({ error: `Apify Error: ${res.status}` }, { status: res.status });
     }
 
     const data = await res.json();
@@ -49,17 +39,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No ads found' }, { status: 404 });
     }
 
-    // Простой ответ без Gemini для теста связи
+    // Анализ Gemini
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
+    const geminiRes = await fetch(geminiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: `Analyze this ad hook and offer: "${data[0].adCopy || 'Visual ad'}"` }] }]
+      })
+    });
+    const geminiData = await geminiRes.json();
+    const aiResult = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Ready to scale";
+
     return NextResponse.json([{
       id: Date.now(),
-      brand: data[0].pageName || 'Found',
-      hook: "Connection established! Gemini analysis next.",
+      brand: data[0].pageName || 'Found Brand',
+      hook: aiResult.trim(),
       impressions: 'High',
       status: 'WINNING'
     }]);
 
   } catch (e: any) {
-    console.error("Critical Error:", e.message);
-    return NextResponse.json({ error: 'Server Error' }, { status: 500 });
+    return NextResponse.json({ error: 'System Busy' }, { status: 500 });
   }
 }
