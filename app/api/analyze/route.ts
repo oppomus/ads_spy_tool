@@ -3,28 +3,29 @@ import { NextResponse } from 'next/server';
 export async function POST(req: Request) {
   try {
     const { url } = await req.json();
-    const APIFY_TOKEN = process.env.APIFY_TOKEN;
-    const GEMINI_KEY = process.env.GEMINI_API_KEY;
+    const token = process.env.APIFY_TOKEN || "";
+    const geminiKey = process.env.GEMINI_API_KEY || "";
 
-    if (!APIFY_TOKEN || !GEMINI_KEY) {
-      return NextResponse.json({ error: 'API Keys missing in Vercel settings' }, { status: 500 });
+    // ВЫВОДИМ В ЛОГИ ПРОВЕРКУ ТOКЕНА
+    console.log("--- DEBUG START ---");
+    console.log("Token Length:", token.length);
+    if (token.length > 8) {
+      console.log(`Token Check: ${token.substring(0, 4)}...${token.substring(token.length - 4)}`);
+    } else {
+      console.log("Token Check: TOO SHORT OR EMPTY!");
     }
 
-    // Извлекаем только цифры (ID страницы)
     const idMatch = url.match(/\d{10,}/); 
-    const searchQuery = idMatch ? idMatch[0] : url;
+    const pageId = idMatch ? idMatch[0] : url;
 
-    console.log("--- REVERTING TO OFFICIAL SCRAPER ---");
-    console.log("Targeting ID:", searchQuery);
+    // Прямой вызов официального скрапера
+    const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}`;
 
-    // ВОЗВРАЩАЕМ ОФИЦИАЛЬНЫЙ АДРЕС
-    const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
-
-    const runResponse = await fetch(apifyUrl, {
+    const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
-        "searchQuery": searchQuery, 
+        "searchQuery": pageId, 
         "limit": 1,
         "viewAllAds": true,
         "country": "ALL",
@@ -32,44 +33,33 @@ export async function POST(req: Request) {
       })
     });
 
-    if (!runResponse.ok) {
-      const errorText = await runResponse.text();
-      console.error("Apify Error:", errorText);
-      return NextResponse.json({ error: `Apify Official Scraper Error: ${runResponse.status}` }, { status: runResponse.status });
+    console.log("Apify Status:", res.status);
+
+    if (res.status === 404) {
+      const errorBody = await res.text();
+      console.error("Apify Body Error:", errorBody);
+      return NextResponse.json({ 
+        error: `404: Scraper not found. Verify your Token matches the account where you added the scraper.` 
+      }, { status: 404 });
     }
 
-    const adsData = await runResponse.json();
+    const data = await res.json();
     
-    if (!Array.isArray(adsData) || adsData.length === 0) {
-      return NextResponse.json({ error: 'No ads found by official scraper' }, { status: 404 });
+    if (!Array.isArray(data) || data.length === 0) {
+      return NextResponse.json({ error: 'No ads found' }, { status: 404 });
     }
 
-    // Анализ Gemini
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`;
-    const geminiResponse = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: `Describe the hook and offer of this ad in 1 short English sentence: "${adsData[0].adCopy || 'Visual ad'}"`
-          }]
-        }]
-      })
-    });
-
-    const geminiData = await geminiResponse.json();
-    const aiResult = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Analysis pending";
-
+    // Простой ответ без Gemini для теста связи
     return NextResponse.json([{
       id: Date.now(),
-      brand: adsData[0].pageName || 'Brand Found',
-      hook: aiResult.trim(),
-      impressions: 'Verified High',
+      brand: data[0].pageName || 'Found',
+      hook: "Connection established! Gemini analysis next.",
+      impressions: 'High',
       status: 'WINNING'
     }]);
 
-  } catch (error: any) {
-    return NextResponse.json({ error: 'Connection busy. Retry in 5s.' }, { status: 500 });
+  } catch (e: any) {
+    console.error("Critical Error:", e.message);
+    return NextResponse.json({ error: 'Server Error' }, { status: 500 });
   }
 }
