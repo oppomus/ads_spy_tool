@@ -61,24 +61,26 @@ export default function VibeAdsSpy() {
         </div>
       )}
 
-      <div className="max-w-6xl mx-auto bg-[#0f172a] rounded-2xl border border-slate-800 overflow-hidden">
+      <div className="max-w-6xl mx-auto bg-[#0f172a] rounded-2xl border border-slate-800 overflow-hidden shadow-2xl">
         <table className="w-full text-left">
           <thead className="bg-slate-800/50 text-slate-400 text-xs uppercase">
             <tr>
-              <th className="p-5">Brand</th>
-              <th className="p-5">AI Analysis (Hook & Offer)</th>
-              <th className="p-5">Impressions</th>
-              <th className="p-5">Status</th>
+              <th className="p-5 font-semibold">Brand</th>
+              <th className="p-5 font-semibold">AI Analysis (Hook & Offer)</th>
+              <th className="p-5 font-semibold">Impressions</th>
+              <th className="p-5 font-semibold">Status</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800">
             {ads.map((ad) => (
               <tr key={ad.id} className="hover:bg-slate-800/30 transition-colors">
-                <td className="p-5 font-bold">{ad.brand}</td>
-                <td className="p-5 text-blue-300 italic">"{ad.hook}"</td>
-                <td className="p-5 text-slate-400">{ad.impressions}</td>
+                <td className="p-5 font-bold text-slate-200">{ad.brand}</td>
+                <td className="p-5 text-blue-300 italic">
+                  &quot;{ad.hook}&quot;
+                </td>
+                <td className="p-5 text-slate-400 font-mono">{ad.impressions}</td>
                 <td className="p-5">
-                  <span className="bg-green-500/20 text-green-400 text-[10px] px-2 py-1 rounded-full border border-green-500/30 font-bold">
+                  <span className="bg-green-500/20 text-green-400 text-[10px] px-2 py-1 rounded-full border border-green-500/30 font-bold uppercase">
                     {ad.status}
                   </span>
                 </td>
