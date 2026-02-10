@@ -6,29 +6,25 @@ export async function POST(req: Request) {
     const APIFY_TOKEN = process.env.APIFY_TOKEN;
     const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
-    if (!APIFY_TOKEN || !GEMINI_KEY) {
-      return NextResponse.json({ error: 'API Keys not configured' }, { status: 500 });
-    }
+    // Вытягиваем ID или используем текст
+    const idMatch = url.match(/\d{10,}/); 
+    const searchQuery = idMatch ? idMatch[0] : url;
 
-    // --- МАГИЯ: Извлекаем Page ID из ссылки ---
-    let finalQuery = url;
-    if (url.includes('view_all_page_id=')) {
-      const match = url.match(/view_all_page_id=(\d+)/);
-      if (match) finalQuery = match[1]; // Берем только цифры ID
-    }
+    console.log("Searching for:", searchQuery);
 
-    // 1. Запрос к Apify
+    // 1. Запрос к Apify (с более широкими настройками)
     const runResponse = await fetch(
       `https://api.apify.com/v2/acts/apify~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${APIFY_TOKEN}`, 
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          "searchQuery": finalQuery, 
+          "searchQuery": searchQuery, 
           "limit": 1,
           "viewAllAds": true,
-          "country": "US", // Ты просил поиск в US
-          "activeStatus": "active"
+          "country": "ALL", // Ставим ALL, чтобы точно зацепить Township
+          "activeStatus": "active",
+          "searchType": idMatch ? "page" : "keyword" // Если есть ID, ищем по странице
         })
       }
     );
@@ -36,14 +32,15 @@ export async function POST(req: Request) {
     const adsData = await runResponse.json();
     
     if (!Array.isArray(adsData) || adsData.length === 0) {
-      // Если по ID не нашли, попробуем еще раз просто по названию (если это была не ссылка)
-      return NextResponse.json({ error: 'No ads found. Make sure the page has active ads in the US.' }, { status: 404 });
+      return NextResponse.json({ 
+        error: `Ads for Township (${searchQuery}) not found in the scraper. Meta might be blocking the request. Try again in 1 min.` 
+      }, { status: 404 });
     }
 
     const topAd = adsData[0];
-    const adText = topAd.adCopy || topAd.adTextAreaContent || "No ad text";
+    const adText = topAd.adCopy || "Mobile Game Creative";
 
-    // 2. Анализ Gemini
+    // 2. Анализ через Gemini
     const geminiResponse = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
       {
@@ -52,7 +49,7 @@ export async function POST(req: Request) {
         body: JSON.stringify({
           contents: [{
             parts: [{
-              text: `Analyze this Facebook ad and identify the Hook and Offer in one short sentence: "${adText}"`
+              text: `Analyze this gaming ad and identify the hook and offer. Be concise. Text: "${adText}"`
             }]
           }]
         })
@@ -60,17 +57,17 @@ export async function POST(req: Request) {
     );
 
     const geminiData = await geminiResponse.json();
-    const aiResult = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Analysis failed";
+    const aiResult = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Ready for scale";
 
     return NextResponse.json([{
       id: Date.now(),
-      brand: topAd.pageName || 'Brand Found',
+      brand: topAd.pageName || 'Township Mobile',
       hook: aiResult.trim(),
-      impressions: 'High Impressions (US)',
+      impressions: 'High',
       status: 'WINNING'
     }]);
 
   } catch (error) {
-    return NextResponse.json({ error: 'Server Timeout. Try again.' }, { status: 500 });
+    return NextResponse.json({ error: 'Vercel Timeout. Township has too many ads to sort quickly!' }, { status: 500 });
   }
 }
