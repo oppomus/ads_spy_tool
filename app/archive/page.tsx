@@ -31,23 +31,23 @@ export default function ArchiveListPage() {
         ) : (
           <div className="grid gap-4">
             {history.map((item) => (
-              <Link 
+              <button 
                 key={item.id} 
-                href={`/archive/${item.id}`}
-                className="group bg-slate-900/50 border border-slate-800 p-6 rounded-2xl hover:border-blue-500/50 transition-all flex justify-between items-center"
+                onClick={() => window.location.href = `/archive/${item.id}`}
+                className="w-full text-left group bg-slate-900/50 border border-slate-800 p-6 rounded-2xl hover:border-blue-500/50 transition-all flex justify-between items-center"
               >
                 <div>
                   <h2 className="text-xl font-bold uppercase italic group-hover:text-blue-400 transition-colors">
                     {item.brand_name || 'Unknown Brand'}
                   </h2>
-                  <p className="text-slate-500 text-[10px] font-mono mt-1">
-                    ID: {item.page_id} • {new Date(item.created_at).toLocaleString()}
+                  <p className="text-slate-500 text-[10px] font-mono mt-1 uppercase">
+                    {new Date(item.created_at).toLocaleString()}
                   </p>
                 </div>
                 <div className="bg-slate-800 px-4 py-2 rounded-xl text-[10px] font-black uppercase text-slate-400 group-hover:bg-blue-600 group-hover:text-white transition-all">
                   {item.creatives?.length || 0} ADS FOUND →
                 </div>
-              </Link>
+              </button>
             ))}
           </div>
         )}
