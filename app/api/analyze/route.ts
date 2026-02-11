@@ -3,7 +3,8 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
-export const maxDuration = 60; // Лимит Vercel
+// Vercel Hobby limit = 60s
+export const maxDuration = 60; 
 
 export async function POST(req: Request) {
   try {
@@ -14,38 +15,39 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // ПРИМЕНЕНО ПО ИНСТРУКЦИИ: Синхронный запуск нового скрапера с таймаутом 55с
-    // Используем curious_coder/facebook-ads-library-scraper
-    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=55`;
+    // СТРУКТУРА СОГЛАСНО README curious_coder/facebook-ads-library-scraper
+    // Используем urls (массив) и limitPerUrl
+    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=50`;
     
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
         "urls": [ `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` ], 
-        "limitPerUrl": 10,           // Лимит на одну ссылку
+        "limitPerUrl": 10,           // Жесткий лимит на поиск
         "maxResults": 10,            // Общий лимит
-        "scrapeAdDetails": true      // Собираем детали (текст, видео)
+        "scrapeAdDetails": true      // ОБЯЗАТЕЛЬНО для получения видео-ссылок
       })
     });
 
     const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) throw new Error("Apify timeout or no results found.");
+    if (!Array.isArray(data) || data.length === 0) throw new Error("Apify returned no results or timed out.");
 
     const processed = [];
 
-    // ОБРАБОТКА: Скачиваем видео в Supabase
-    for (const ad of data.slice(0, 10)) {
-      const fbVideoUrl = ad.adCreativeVideoData?.videoUrl || ad.videoUrl;
+    // ОБРАБОТКА: Качаем видео в Supabase
+    // Берем только первые 5, чтобы успеть за 60 секунд Vercel
+    for (const ad of data.slice(0, 5)) {
+      const videoLink = ad.adCreativeVideoData?.videoUrl || ad.videoUrl;
       let storageUrl = null;
 
-      if (fbVideoUrl) {
+      if (videoLink) {
         try {
-          const vFetch = await fetch(fbVideoUrl);
+          const vFetch = await fetch(videoLink);
           const buffer = await vFetch.arrayBuffer();
           const fileName = `vid_${ad.adId || Math.random().toString(36).substring(7)}.mp4`;
 
-          // Загрузка через service_role_key (игнорирует RLS)
+          // Service role игнорирует RLS, загрузка пройдет
           const { error: upError } = await supabase.storage
             .from('ads_videos')
             .upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
@@ -59,20 +61,20 @@ export async function POST(req: Request) {
       processed.push({
         id: ad.adId || Math.random().toString(36).substring(7),
         thumbnail: ad.adCreativeThumbnails?.[0] || ad.thumbnailUrl || "",
-        video: storageUrl,
-        text: ad.adCopy || ad.adCaption || "Ad creative"
+        video: storageUrl, // Ссылка на твой Storage
+        text: ad.adCopy || ad.adCaption || "Gameplay"
       });
     }
 
-    // ВИЗУАЛЬНЫЙ АНАЛИЗ GEMINI
+    // АНАЛИЗ GEMINI (Разбор визуальных хуков)
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `Analyze 3 visual strategies for "${data[0].pageName || 'Brand'}". 
-            Break down the Hook (first 2s) and Psychology. Be very detailed. 
+            text: `Analyze 3 visual concepts for brand "${data[0].pageName || 'Brand'}". 
+            Break down the Hook (first 2s) and Psychology.
             Data: ${JSON.stringify(processed)}`
           }]
         }]
