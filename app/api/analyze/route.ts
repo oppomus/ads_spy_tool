@@ -1,65 +1,70 @@
 import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
 export async function POST(req: Request) {
   try {
     const { url } = await req.json();
-    const token = process.env.APIFY_TOKEN || "";
-    const geminiKey = process.env.GEMINI_API_KEY || "";
+    const token = process.env.APIFY_TOKEN;
+    const geminiKey = process.env.GEMINI_API_KEY;
 
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // Официальный адрес скрапера из твоего списка
     const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}`;
     const fbLibraryUrl = `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL`;
 
-    // Запрос с жесткими лимитами для скорости и экономии
+    // 1. Скрапим ТОП-10 видео (Экономим баланс!)
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
         "startUrls": [{ "url": fbLibraryUrl }], 
-        "limit": 1,
+        "limit": 10, 
         "maxRequestsPerStartUrl": 1,
-        "isDetailedAdsView": false // Экономим время и $
+        "isDetailedAdsView": true 
       })
     });
 
     const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) {
-      return NextResponse.json({ error: 'No ads' }, { status: 404 });
-    }
+    if (!Array.isArray(data) || data.length === 0) return NextResponse.json({ error: 'No ads' }, { status: 404 });
 
-    const ad = data[0];
+    const combinedTexts = data.map((ad, i) => `[Ad ${i+1}]: ${ad.adCopy}`).join("\n\n");
 
-    // Улучшенный промпт для Gemini, чтобы избежать "Ready to scale"
+    // 2. Глубокий разбор ВИДЕО-КОНЦЕПЦИЙ БРЕНДА
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `Analyze this ad as a growth hacker. Ad text: "${ad.adCopy || 'Visual only'}". 
-            Identify the core HOOK and the OFFER. Format: Hook: [text] | Offer: [text]. Max 20 words.`
+            text: `Analyze the top 10 VIDEO ads for brand "${data[0].pageName}".
+            Identify 2-3 core "VIDEO CONCEPTS" being scaled (e.g., "Fail Motivation", "ASMR Cleanup").
+            For each concept: Name, Visual Hook (first 3s), Core Mechanic, and Psychology.
+            Provide a Brand Strategy Teardown at the end. Data: "${combinedTexts}"`
           }]
         }]
       })
     });
 
     const geminiData = await geminiRes.json();
-    const aiAnalysis = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Creative-centric approach";
+    const strategy = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Analysis complete.";
 
-    return NextResponse.json({
-      id: Date.now(),
-      brand: ad.pageName || 'Brand',
-      hook: aiAnalysis.trim(),
-      // Пытаемся достать превью картинки
-      image: ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl, 
-      status: 'ACTIVE',
-      adUrl: ad.adSnapshotUrl
-    });
+    const creatives = data.map(ad => ({
+      id: ad.adId,
+      thumbnail: ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl,
+      link: ad.adSnapshotUrl,
+      isVideo: true 
+    }));
 
+    // 3. Сохранение в Supabase
+    await supabase.from('ads_library').insert([{
+      page_id: pageId, brand_name: data[0].pageName, strategy_analysis: strategy, creatives: creatives
+    }]);
+
+    return NextResponse.json({ brand: data[0].pageName, strategy, creatives });
   } catch (e: any) {
-    return NextResponse.json({ error: 'Retry' }, { status: 500 });
+    return NextResponse.json({ error: 'Server Error' }, { status: 500 });
   }
 }
