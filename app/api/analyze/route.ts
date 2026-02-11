@@ -39,22 +39,28 @@ export async function POST(req: Request) {
           if (vFetch.ok) {
             const buffer = await vFetch.arrayBuffer();
 
-            // --- ШАГ 1: ЗАГРУЗКА В GOOGLE (Исправленный протокол) ---
+            // --- ШАГ 1: ЗАГРУЗКА В GOOGLE (Ультра-стабильный метод) ---
             if (i === 0) {
               console.info(`[DEBUG] Uploading FULL video (${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB)...`);
+              
               const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
                   'X-Goog-Upload-Protocol': 'media',
                   'X-Goog-Upload-Header-Content-Type': 'video/mp4',
-                  'Content-Type': 'video/mp4'
+                  'Content-Type': 'video/mp4',
                 },
-                body: Buffer.from(buffer)
+                // ПЕРЕДАЕМ КАК Uint8Array — это исключает ошибки 400 в Node.js
+                body: new Uint8Array(buffer) 
               });
 
-              if (!uploadRes.ok) throw new Error(`Google Upload Status: ${uploadRes.status}`);
-              googleFileResource = await uploadRes.json();
-              console.info(`[DEBUG] File uploaded: ${googleFileResource.file?.name}`);
+              if (!uploadRes.ok) {
+                const errText = await uploadRes.text();
+                console.error(`[GOOGLE UPLOAD ERROR] Status: ${uploadRes.status}, Body: ${errText}`);
+              } else {
+                googleFileResource = await uploadRes.json();
+                console.info(`[DEBUG] File successfully uploaded to Google: ${googleFileResource.file?.name}`);
+              }
             }
 
             // --- ШАГ 2: SUPABASE STORAGE ---
@@ -74,31 +80,28 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- ШАГ 3: ЦИКЛ ПРОВЕРКИ ГОТОВНОСТИ (Polling) ---
-    let strategy = "Vision analysis failed (Timeout).";
+    // --- ШАГ 3: ЖДЕМ И АНАЛИЗИРУЕМ (Только если файл загружен) ---
+    let strategy = "Vision analysis failed (Upload Issue).";
+    
     if (googleFileResource?.file?.name) {
-      const fileName = googleFileResource.file.name;
-      console.info(`[DEBUG] Waiting for file ${fileName} to be ACTIVE...`);
+      const gFileName = googleFileResource.file.name;
+      console.info(`[DEBUG] Polling status for ${gFileName}...`);
       
-      // Проверяем статус до 5 раз (обычно занимает 5-10 сек)
-      for (let attempt = 0; attempt < 5; attempt++) {
-        await new Promise(r => setTimeout(r, 3000)); 
-        const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${geminiKey}`);
+      for (let attempt = 0; attempt < 6; attempt++) {
+        await new Promise(r => setTimeout(r, 4000)); // Ждем 4 сек между проверками
+        const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${gFileName}?key=${geminiKey}`);
         const checkData = await checkRes.json();
         
         if (checkData.state === 'ACTIVE') {
-          console.info("[DEBUG] Video is ACTIVE. Starting analysis...");
+          console.info("[DEBUG] Video is ACTIVE. Sending to Gemini 1.5 Flash...");
           
-          // --- ШАГ 4: РЕАЛЬНЫЙ АНАЛИЗ ПОЛНОГО ВИДЕО ---
           const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{
                 parts: [
-                  { text: `You are a Senior UA Creative Strategist. WATCH the provided full video. 
-                           Identify: 1. CORE CONCEPT 2. VISUAL HOOK (0-3s) 3. STEP-BY-STEP MECHANICS (detailed) 4. PSYCHOLOGY. 
-                           Be highly descriptive. Respond ONLY in English.` },
+                  { text: "You are a Senior UA Lead. WATCH this video and provide a detailed teardown of: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. MECHANICS, 4. PSYCHOLOGY. Respond in English." },
                   { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
                 ]
               }]
@@ -106,10 +109,10 @@ export async function POST(req: Request) {
           });
 
           const gData = await geminiRes.json();
-          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI Error during vision processing.";
-          break; // Выходим из цикла, если анализ готов
+          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI Error: Could not extract text.";
+          break;
         }
-        console.info(`[DEBUG] State is ${checkData.state}. Waiting...`);
+        console.info(`[DEBUG] Attempt ${attempt + 1}: State is ${checkData.state}`);
       }
     }
 
