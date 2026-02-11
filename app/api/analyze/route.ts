@@ -24,7 +24,7 @@ export async function POST(req: Request) {
     if (!Array.isArray(data)) throw new Error("Apify failed");
 
     const processed = [];
-    let googleFileUri = null;
+    let googleFileResource: any = null;
 
     for (let i = 0; i < data.slice(0, 5).length; i++) {
       const ad = data[i];
@@ -39,28 +39,22 @@ export async function POST(req: Request) {
           if (vFetch.ok) {
             const buffer = await vFetch.arrayBuffer();
 
-            // --- ШАГ 1: ЗАГРУЗКА В GOOGLE (Simple Upload Protocol) ---
+            // --- ШАГ 1: ЗАГРУЗКА В GOOGLE (Исправленный протокол) ---
             if (i === 0) {
-              console.info(`[DEBUG] Uploading FULL video (${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB) to Google...`);
-              
-              // Используем упрощенный протокол загрузки, который понимает Node.js
+              console.info(`[DEBUG] Uploading FULL video (${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB)...`);
               const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
                   'X-Goog-Upload-Protocol': 'media',
+                  'X-Goog-Upload-Header-Content-Type': 'video/mp4',
                   'Content-Type': 'video/mp4'
                 },
                 body: Buffer.from(buffer)
               });
 
-              if (!uploadRes.ok) {
-                const errText = await uploadRes.text();
-                throw new Error(`Google Upload Failed: ${errText}`);
-              }
-
-              const uploadData = await uploadRes.json();
-              googleFileUri = uploadData.file?.uri;
-              console.info(`[DEBUG] Google File URI: ${googleFileUri}`);
+              if (!uploadRes.ok) throw new Error(`Google Upload Status: ${uploadRes.status}`);
+              googleFileResource = await uploadRes.json();
+              console.info(`[DEBUG] File uploaded: ${googleFileResource.file?.name}`);
             }
 
             // --- ШАГ 2: SUPABASE STORAGE ---
@@ -68,9 +62,7 @@ export async function POST(req: Request) {
             await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e: any) { 
-          console.error(`[MEDIA ERROR] ${adId}: ${e.message}`); 
-        }
+        } catch (e: any) { console.error(`[MEDIA ERROR] ${adId}: ${e.message}`); }
       }
 
       processed.push({
@@ -82,35 +74,42 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- ШАГ 3: ОЖИДАНИЕ И АНАЛИЗ ---
-    let strategy = "Vision analysis failed.";
-    if (googleFileUri) {
-      console.info("[DEBUG] Waiting 8s for Google to process video...");
-      await new Promise(r => setTimeout(r, 8000));
+    // --- ШАГ 3: ЦИКЛ ПРОВЕРКИ ГОТОВНОСТИ (Polling) ---
+    let strategy = "Vision analysis failed (Timeout).";
+    if (googleFileResource?.file?.name) {
+      const fileName = googleFileResource.file.name;
+      console.info(`[DEBUG] Waiting for file ${fileName} to be ACTIVE...`);
+      
+      // Проверяем статус до 5 раз (обычно занимает 5-10 сек)
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await new Promise(r => setTimeout(r, 3000)); 
+        const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${geminiKey}`);
+        const checkData = await checkRes.json();
+        
+        if (checkData.state === 'ACTIVE') {
+          console.info("[DEBUG] Video is ACTIVE. Starting analysis...");
+          
+          // --- ШАГ 4: РЕАЛЬНЫЙ АНАЛИЗ ПОЛНОГО ВИДЕО ---
+          const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { text: `You are a Senior UA Creative Strategist. WATCH the provided full video. 
+                           Identify: 1. CORE CONCEPT 2. VISUAL HOOK (0-3s) 3. STEP-BY-STEP MECHANICS (detailed) 4. PSYCHOLOGY. 
+                           Be highly descriptive. Respond ONLY in English.` },
+                  { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
+                ]
+              }]
+            })
+          });
 
-      try {
-        const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: "You are a Senior UA Creative Strategist. WATCH this full video and identify the CREATIVE CONCEPT, VISUAL HOOK, and PSYCHOLOGY. Respond ONLY in English." },
-                { file_data: { mime_type: "video/mp4", file_uri: googleFileUri } }
-              ]
-            }]
-          })
-        });
-
-        const gData = await geminiRes.json();
-        if (gData.error) {
-          console.error("[GEMINI API ERROR]", JSON.stringify(gData.error));
-          strategy = `AI Error: ${gData.error.message}`;
-        } else {
-          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis generated.";
+          const gData = await geminiRes.json();
+          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI Error during vision processing.";
+          break; // Выходим из цикла, если анализ готов
         }
-      } catch (aiErr: any) {
-        console.error("[AI CRASH]", aiErr.message);
+        console.info(`[DEBUG] State is ${checkData.state}. Waiting...`);
       }
     }
 
