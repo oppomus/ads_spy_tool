@@ -1,13 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-// Инициализация Supabase с сервисным ключом для обхода ограничений RLS на запись
 const supabase = createClient(
   process.env.SUPABASE_URL || '', 
   process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
-// Лимит времени выполнения для Vercel Hobby (60 секунд)
 export const maxDuration = 60; 
 
 export async function POST(req: Request) {
@@ -16,13 +14,11 @@ export async function POST(req: Request) {
     const token = process.env.APIFY_TOKEN;
     const geminiKey = process.env.GEMINI_API_KEY;
 
-    // Извлекаем ID страницы из URL
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // Запрос к скраперу curious_coder согласно его спецификации
-    // timeout=45 дает запас времени для сохранения видео в Supabase до обрыва связи Vercel
-    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=45&maxChargedResults=10`;
+    // Снайперский запрос к curious_coder
+    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=50&maxChargedResults=10`;
     
     const res = await fetch(apifyUrl, {
       method: 'POST',
@@ -30,19 +26,19 @@ export async function POST(req: Request) {
       body: JSON.stringify({ 
         "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
         "count": 10,
-        "scrapeAdDetails": true // Обязательно для получения ссылок на видео
+        "scrapeAdDetails": true 
       })
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify error: " + JSON.stringify(data));
+    if (!Array.isArray(data)) throw new Error("Apify error");
 
     const processed = [];
 
-    // Обрабатываем первые 5 креативов, чтобы уложиться в тайминги
+    // Обработка данных согласно твоему JSON
     for (const ad of data.slice(0, 5)) {
-      const adId = ad.ad_archive_id; // Ключ из твоего JSON
-      const card = ad.snapshot?.cards?.[0]; // Видео данные лежат в карточках
+      const adId = ad.ad_archive_id;
+      const card = ad.snapshot?.cards?.[0];
       const fbVideoUrl = card?.video_hd_url || card?.video_sd_url;
       const thumbUrl = card?.video_preview_image_url;
       
@@ -50,7 +46,6 @@ export async function POST(req: Request) {
 
       if (fbVideoUrl) {
         try {
-          // Скачиваем видео и заливаем в Supabase Storage
           const vFetch = await fetch(fbVideoUrl);
           const buffer = await vFetch.arrayBuffer();
           const fileName = `vid_${adId}.mp4`;
@@ -62,66 +57,48 @@ export async function POST(req: Request) {
           if (!upError) {
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e) { 
-          console.error(`Media processing failed for ad ${adId}`); 
-        }
+        } catch (e) { console.error("Upload fail for ad:", adId); }
       }
 
       processed.push({
         id: adId,
         thumbnail: thumbUrl || "",
-        video: storageUrl, // Ссылка на видео в твоем облаке
-        rawVideoUrl: fbVideoUrl, // Передаем Gemini оригинал для анализа
-        title: card?.title || "No title",
-        body: ad.snapshot?.body?.text || "No description"
+        video: storageUrl,
+        title: card?.title || "Mobile Ad",
+        body: ad.snapshot?.body?.text || ""
       });
     }
 
-    // ГЛУБОКИЙ UA-АНАЛИЗ КОНЦЕПТОВ (Gemini 1.5 Flash)
-    // Мы отправляем ссылки на видео прямо в промпт, чтобы ИИ мог их "посмотреть"
+    // Запрос к Gemini для глубокого визуального анализа
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `Ты — Senior UA Creative Lead. Проведи визуальный разбор видео-креативов для бренда "${data[0]?.snapshot?.page_name}". 
-            
+            text: `Ты — Senior UA Creative Lead. Проведи визуальный разбор этих креативов для "${data[0]?.snapshot?.page_name}". 
             ДАННЫЕ: ${JSON.stringify(processed)}
-
-            ТВОЯ ЗАДАЧА:
-            1. Сгруппируй эти видео в 2-3 логических "КРЕАТИВНЫХ КОНЦЕПТА" (например, "Player Fail", "Satisfaction/Cleaning", "Story-driven Choice").
-            2. Для КАЖДОГО концепта распиши:
-               - ВИЗУАЛЬНЫЙ ХУК (0-3 сек): Что именно происходит в первые секунды, чтобы остановить скролл? (персонажи, действия, контрасты).
-               - МЕХАНИКА И СЕТТИНГ: Опиши геймплей (Match-3, пазл, симуляция) и окружение.
-               - ПСИХОЛОГИЯ: Почему это цепляет? (чувство вины, азарт, удовлетворение от порядка).
-               - WIN/FAIL STATE: Используется ли механика проигрыша игрока?
-            
-            Ответ дай на русском языке в формате Markdown. Используй жирные заголовки и списки.`
+            Сгруппируй их по КОНЦЕПТАМ. Для каждого концепта опиши: Визуальный хук (0-3 сек), Механику геймплея и Психологию (почему это работает). 
+            Пиши на русском, используй простые списки и заголовки.`
           }]
         }]
       })
     });
 
     const gData = await geminiRes.json();
-    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Анализ не удался.";
+    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Анализ готов.";
 
-    // Сохранение результата в архив базы данных
+    // Сохраняем в таблицу ads_library
     await supabase.from('ads_library').insert([{
       page_id: pageId, 
-      brand_name: data[0]?.snapshot?.page_name || "Unknown Brand", 
+      brand_name: data[0]?.snapshot?.page_name || "Brand", 
       strategy_analysis: strategy, 
       creatives: processed
     }]);
 
-    return NextResponse.json({ 
-      brand: data[0]?.snapshot?.page_name, 
-      strategy, 
-      creatives: processed 
-    });
+    return NextResponse.json({ brand: data[0]?.snapshot?.page_name, strategy, creatives: processed });
 
   } catch (e: any) {
-    console.error("Critical Error:", e.message);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
