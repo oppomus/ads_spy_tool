@@ -13,20 +13,28 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. Апифай (Таймаут 60с)
+    // 1. АПИФАЙ С СОРТИРОВКОЙ ПО ПОКАЗАМ (total_impressions)
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`;
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], "count": 10, "scrapeAdDetails": true })
+      body: JSON.stringify({ 
+        "urls": [{ 
+          // Добавлены параметры сортировки: direction=desc и mode=total_impressions
+          "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL&sort_data[direction]=desc&sort_data[mode]=total_impressions` 
+        }], 
+        "count": 10, 
+        "scrapeAdDetails": true 
+      })
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify failed");
+    if (!Array.isArray(data)) throw new Error("Apify failed to fetch data.");
 
     const processed = [];
     let googleFileResource: any = null;
 
+    // Обрабатываем 10 объявлений (как ты и просил)
     for (let i = 0; i < data.slice(0, 10).length; i++) {
       const ad = data[i];
       const adId = ad.ad_archive_id;
@@ -40,7 +48,7 @@ export async function POST(req: Request) {
           if (vFetch.ok) {
             const buffer = await vFetch.arrayBuffer();
 
-            // Resumable Upload (Работает идеально)
+            // «Железный» Resumable Upload (только для первого видео для анализа)
             if (i === 0 && !googleFileResource) {
               const startRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
@@ -64,11 +72,12 @@ export async function POST(req: Request) {
               }
             }
 
+            // Загрузка в Supabase Storage
             const fileName = `vid_${adId}.mp4`;
             await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e: any) { console.error(`Media err: ${adId}`); }
+        } catch (e: any) { console.error(`[MEDIA ERROR] ${adId}`); }
       }
 
       processed.push({
@@ -80,7 +89,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 2. АНАЛИЗ (ПОЛЛИНГ + ПЕРЕБОР)
+    // 2. АНАЛИЗ (ПОЛЛИНГ + ПЕРЕБОР МОДЕЛЕЙ)
     let strategy = "Vision analysis unavailable.";
     if (googleFileResource?.file?.name) {
       const gFileName = googleFileResource.file.name;
@@ -94,7 +103,6 @@ export async function POST(req: Request) {
           console.info("[IRON] Video is ACTIVE. Indexing (25s)...");
           await new Promise(r => setTimeout(r, 25000)); 
 
-          // Список моделей: gemini-1.5-flash-8b имеет самые высокие лимиты!
           const models = ['gemini-1.5-flash-8b', 'gemini-1.5-flash', 'gemini-2.0-flash-001'];
 
           for (const model of models) {
@@ -127,8 +135,6 @@ export async function POST(req: Request) {
             } else if (geminiRes.status === 429) {
               console.warn(`[QUOTA] ${model} rate limited.`);
               strategy = "AI Quota exceeded. Check Google AI Studio billing.";
-            } else {
-              console.warn(`[FAIL] ${model}: ${gData.error?.message || "No data"}`);
             }
           }
           break;
@@ -136,12 +142,16 @@ export async function POST(req: Request) {
       }
     }
 
+    // 3. СОХРАНЕНИЕ В БАЗУ
+    const brandName = data[0]?.snapshot?.page_name || "Brand";
     await supabase.from('ads_library').insert([{
-      page_id: pageId, brand_name: data[0]?.snapshot?.page_name || "Brand", 
-      strategy_analysis: strategy, creatives: processed
+      page_id: pageId, 
+      brand_name: brandName, 
+      strategy_analysis: strategy, 
+      creatives: processed
     }]);
 
-    return NextResponse.json({ brand: data[0]?.snapshot?.page_name, strategy, creatives: processed });
+    return NextResponse.json({ brand: brandName, strategy, creatives: processed });
 
   } catch (e: any) {
     console.error(`[CRITICAL] ${e.message}`);
