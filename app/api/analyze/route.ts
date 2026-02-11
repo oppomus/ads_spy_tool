@@ -2,9 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
-
-// Лимит Vercel Pro
-export const maxDuration = 300; 
+export const maxDuration = 300; // Лимит Pro-плана
 
 export async function POST(req: Request) {
   try {
@@ -15,16 +13,22 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // Скрапинг
-    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=30&maxChargedResults=10`;
+    // ФИКС 1: Увеличиваем таймаут до 60 секунд, чтобы Apify не падал
+    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`;
+    
+    console.info(`[PRO] Starting Scraper for ID: ${pageId}...`);
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], "count": 10, "scrapeAdDetails": true })
+      body: JSON.stringify({ 
+        "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
+        "count": 10,
+        "scrapeAdDetails": true 
+      })
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify failed");
+    if (!Array.isArray(data)) throw new Error("Apify failed or timed out.");
 
     const processed = [];
     let googleFileResource: any = null;
@@ -40,42 +44,30 @@ export async function POST(req: Request) {
         try {
           const vFetch = await fetch(fbVideoUrl);
           if (vFetch.ok) {
-            const arrayBuffer = await vFetch.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
+            const buffer = await vFetch.arrayBuffer();
 
-            // --- ШАГ 1: MULTIPART UPLOAD В GOOGLE (Для обхода ошибки 400) ---
+            // ФИКС 2: Простейший способ загрузки в Google (без Multipart) для обхода ошибки 400
             if (i === 0 && !googleFileResource) {
-              console.info(`[PRO] Attempting Multipart Upload: ${(buffer.length / 1024 / 1024).toFixed(2)}MB`);
-              
-              const boundary = 'spy_pro_boundary';
-              const metadata = JSON.stringify({ file: { display_name: `creative_${adId}` } });
-              
-              // Собираем пакет данных вручную для гарантированной стабильности
-              const multipartBody = Buffer.concat([
-                Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: video/mp4\r\n\r\n`),
-                buffer,
-                Buffer.from(`\r\n--${boundary}--`)
-              ]);
-
+              console.info(`[PRO] Uploading FULL video to Google (${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB)...`);
               const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
-                  'X-Goog-Upload-Protocol': 'multipart',
-                  'Content-Type': `multipart/related; boundary=${boundary}`
+                  'X-Goog-Upload-Protocol': 'media',
+                  'Content-Type': 'video/mp4'
                 },
-                body: multipartBody
+                body: new Uint8Array(buffer)
               });
 
               if (uploadRes.ok) {
                 googleFileResource = await uploadRes.json();
-                console.info(`[PRO] Google Upload SUCCESS: ${googleFileResource.file?.name}`);
+                console.info(`[PRO] Upload Success: ${googleFileResource.file?.name}`);
               } else {
                 const errText = await uploadRes.text();
-                console.error(`[PRO] Google Upload CRITICAL FAIL: ${uploadRes.status} - ${errText}`);
+                console.error(`[PRO] Google Upload Fail: ${uploadRes.status} - ${errText}`);
               }
             }
 
-            // --- ШАГ 2: В ТВОЙ SUPABASE ---
+            // Загрузка в Supabase
             const fileName = `vid_${adId}.mp4`;
             await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
@@ -92,20 +84,18 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- ШАГ 3: ПОЛЛИНГ И ВИЗУАЛЬНЫЙ АНАЛИЗ ---
-    let strategy = "Vision analysis could not be started (Upload Failed).";
-
+    // ШАГ 3: Ждем готовности и анализируем
+    let strategy = "Vision analysis could not be started.";
     if (googleFileResource?.file?.name) {
       const gFileName = googleFileResource.file.name;
       
-      // Ждем готовности (Polling)
-      for (let attempt = 0; attempt < 12; attempt++) {
-        await new Promise(r => setTimeout(r, 5000)); // На Pro тарифе можем ждать долго
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await new Promise(r => setTimeout(r, 5000)); 
         const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${gFileName}?key=${geminiKey}`);
         const checkData = await checkRes.json();
         
         if (checkData.state === 'ACTIVE') {
-          console.info("[PRO] Video is ACTIVE. Requesting Teardown...");
+          console.info("[PRO] Video is ACTIVE. Starting Teardown...");
           
           const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
             method: 'POST',
@@ -113,7 +103,9 @@ export async function POST(req: Request) {
             body: JSON.stringify({
               contents: [{
                 parts: [
-                  { text: "You are a Senior UA Creative Strategist. WATCH this full video and provide a visual teardown of: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. MECHANICS (step-by-step), 4. PSYCHOLOGY. Respond in English only with high detail." },
+                  { text: `You are a Senior UA Creative Lead. WATCH this video and provide a visual teardown. 
+                           Identify: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. MECHANICS (detailed), 4. PSYCHOLOGY. 
+                           Respond ONLY in English with detailed descriptions of what happens in the video.` },
                   { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
                 ]
               }]
@@ -121,15 +113,14 @@ export async function POST(req: Request) {
           });
 
           const gData = await geminiRes.json();
-          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI returned empty result.";
+          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI Error: Could not generate content.";
           break;
         }
-        console.info(`[PRO] Polling ${gFileName}: ${checkData.state}`);
+        console.info(`[PRO] State: ${checkData.state}. Waiting...`);
       }
     }
 
-    // Сохранение в базу
-    const brandName = data[0]?.snapshot?.page_name || "Mobile Brand";
+    const brandName = data[0]?.snapshot?.page_name || "Brand";
     await supabase.from('ads_library').insert([{
       page_id: pageId, brand_name: brandName, 
       strategy_analysis: strategy, creatives: processed
