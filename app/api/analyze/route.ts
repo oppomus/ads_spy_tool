@@ -12,80 +12,79 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // Сверх-экономичный запрос: лимиты из твоего UI
-    const res = await fetch(`https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}`, {
+    // 1. Снайперский запрос: maxResults 5 и searchPageLimit 1 (Экономим деньги!)
+    const apifyRes = await fetch(`https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
         "startUrls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
-        "maxResults": 10,           // Лимит 10 объявлений
-        "searchPageLimit": 1,        // Только 1-я страница
-        "isDetailedAdsView": true 
+        "maxResults": 5, 
+        "searchPageLimit": 1, // ЗАПРЕТ СКОЛЛА (Обязательно!)
+        "isDetailedAdsView": true
       })
     });
 
-    const data = await res.json();
-    if (!Array.isArray(data)) return NextResponse.json({ error: 'Apify empty' }, { status: 404 });
+    const data = await apifyRes.json();
+    if (!Array.isArray(data)) throw new Error('Apify failed');
 
-    const processedCreatives = [];
+    const processed = [];
 
-    // Обработка видео: скачиваем в твой Bucket
-    for (const ad of data.slice(0, 10)) {
-      const fbVideoUrl = ad.adCreativeVideoData?.videoUrl;
-      let finalUrl = ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl || "";
-      let hasVideo = false;
+    for (const ad of data.slice(0, 5)) {
+      let videoUrl = null;
+      const fbVideo = ad.adCreativeVideoData?.videoUrl;
 
-      if (fbVideoUrl) {
+      if (fbVideo) {
         try {
-          const vRes = await fetch(fbVideoUrl);
-          const buffer = await vRes.arrayBuffer();
-          const fileName = `vid-${ad.adId}.mp4`;
+          const vidRes = await fetch(fbVideo);
+          const buffer = await vidRes.arrayBuffer();
+          const fileName = `vid_${ad.adId}.mp4`;
 
-          // Загрузка (через service_role ключи)
-          const { error: upError } = await supabase.storage
+          // Загрузка видео (service_role ключ позволяет это делать)
+          const { data: upData, error: upError } = await supabase.storage
             .from('ads_videos')
             .upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
 
-          if (!upError) {
-            finalUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
-            hasVideo = true;
+          if (upError) {
+            console.error("Upload Error:", upError.message);
+          } else {
+            videoUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e) { console.error("Download fail:", ad.adId); }
+        } catch (e) { console.error("Video processing error:", e); }
       }
 
-      processedCreatives.push({
+      processed.push({
         id: ad.adId,
-        thumbnail: ad.adCreativeThumbnails?.[0] || finalUrl,
-        video: hasVideo ? finalUrl : null,
-        text: ad.adCopy || ad.adCaption || "Gameplay"
+        thumbnail: ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl,
+        video: videoUrl, // Если тут null, в UI будет "NO VIDEO SAVED"
+        text: ad.adCopy || ad.adCaption || "Mobile gameplay"
       });
     }
 
-    // Полноценный разбор стратегии через Gemini
+    // Анализ через Gemini
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `You are a Senior UA Strategist. Analyze these 10 ads for brand "${data[0].pageName}".
-            Identify the top 3 visual concepts. For each provide:
-            1. Concept Name (e.g., "The Fail Motivation")
-            2. Visual Hook (First 2s description)
-            3. Psychology (Why it forces a click)
-            Data: ${JSON.stringify(processedCreatives)}`
+            text: `Analyze these 5 ads for "${data[0]?.pageName || 'Brand'}". 
+            Break down 2-3 visual concepts: Name, Hook, Psychology. 
+            Data: ${JSON.stringify(processed)}`
           }]
         }]
       })
     });
 
-    const geminiData = await geminiRes.json();
-    const strategy = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Strategy teardown complete.";
+    const gData = await geminiRes.json();
+    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Ready.";
 
     await supabase.from('ads_library').insert([{
-      page_id: pageId, brand_name: data[0].pageName, strategy_analysis: strategy, creatives: processedCreatives
+      page_id: pageId, brand_name: data[0]?.pageName || "Brand", strategy_analysis: strategy, creatives: processed
     }]);
 
-    return NextResponse.json({ brand: data[0].pageName, strategy, creatives: processedCreatives });
-  } catch (e) { return NextResponse.json({ error: 'Busy' }, { status: 500 }); }
+    return NextResponse.json({ brand: data[0]?.pageName, strategy, creatives: processed });
+
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
 }
