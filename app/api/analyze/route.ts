@@ -14,15 +14,15 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // ПРИМЕНЕНО ПО ИНСТРУКЦИИ: Используем 'urls' и 'count' + таймаут 45с
-    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=45&maxChargedResults=10`;
+    // ПРИМЕНЕНО ПО ТВОЕЙ ИНСТРУКЦИИ: Синхронный запуск с лимитом 10
+    const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=50&maxChargedResults=10`;
     
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
         "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
-        "count": 5, 
+        "count": 10,
         "scrapeAdDetails": true 
       })
     });
@@ -34,9 +34,8 @@ export async function POST(req: Request) {
 
     // ОБРАБОТКА ПО ТВОЕМУ JSON
     for (const ad of data.slice(0, 5)) {
-      const adId = ad.ad_archive_id;
-      // Видео лежит в первом "карточке" (cards[0])
-      const card = ad.snapshot?.cards?.[0];
+      const adId = ad.ad_archive_id; // Точный ключ из JSON
+      const card = ad.snapshot?.cards?.[0]; // Видео лежит в карточках
       const fbVideoUrl = card?.video_hd_url || card?.video_sd_url;
       const thumbUrl = card?.video_preview_image_url;
       
@@ -44,53 +43,54 @@ export async function POST(req: Request) {
 
       if (fbVideoUrl) {
         try {
-          console.log(`[LOG] Downloading video for: ${adId}`);
+          console.log(`[LOG] Скачиваю видео для объявления: ${adId}`);
           const vFetch = await fetch(fbVideoUrl);
           const buffer = await vFetch.arrayBuffer();
           const fileName = `vid_${adId}.mp4`;
 
+          // Загрузка через service_role_key
           const { error: upError } = await supabase.storage
             .from('ads_videos')
             .upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
 
           if (!upError) {
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
-            console.log(`[SUCCESS] Stored: ${storageUrl}`);
+            console.log(`[SUCCESS] Сохранено: ${storageUrl}`);
+          } else {
+            console.error(`[STORAGE ERROR] ${upError.message}`);
           }
-        } catch (e) { console.error("Upload fail:", adId); }
+        } catch (e) { console.error("Media fetch fail:", adId); }
       }
 
       processed.push({
         id: adId,
-        thumbnail: thumbUrl,
+        thumbnail: thumbUrl || "",
         video: storageUrl,
-        text: ad.snapshot?.body?.text || "Township Ad"
+        text: ad.snapshot?.body?.text || "Mobile Ad"
       });
     }
 
-    // АНАЛИЗ ГЕЙМПЛЕЯ GEMINI
+    // GEMINI: Анализ визуальной стратегии
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `You are a UA UA Creative Strategist. Analyze these Township ads: ${JSON.stringify(processed)}. 
-            For each video, describe:
-            1. The Visual Hook (what happens in first 3 seconds).
-            2. The Core Concept (e.g., "Failed Logic", "ASMR Building").
-            3. Why this works for Playrix's audience.`
+            text: `As a UA UA Expert, teardown these Township ads: ${JSON.stringify(processed)}. 
+            Explain: Visual Hook, Core Concept, and Psychology.`
           }]
         }]
       })
     });
 
     const gData = await geminiRes.json();
-    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Analysis complete.";
+    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Ready.";
 
+    // ПИШЕМ В БАЗУ
     await supabase.from('ads_library').insert([{
       page_id: pageId, 
-      brand_name: data[0]?.snapshot?.page_name || "Township Mobile", 
+      brand_name: data[0]?.snapshot?.page_name || "Township", 
       strategy_analysis: strategy, 
       creatives: processed
     }]);
