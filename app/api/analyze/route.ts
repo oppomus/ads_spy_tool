@@ -21,10 +21,10 @@ export async function POST(req: Request) {
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify error");
+    if (!Array.isArray(data)) throw new Error("Apify failed");
 
     const processed = [];
-    let firstVideoBase64 = null; 
+    let googleFileUri = null;
 
     for (let i = 0; i < data.slice(0, 5).length; i++) {
       const ad = data[i];
@@ -37,18 +37,24 @@ export async function POST(req: Request) {
         try {
           const vFetch = await fetch(fbVideoUrl);
           if (vFetch.ok) {
-            const fullBuffer = await vFetch.arrayBuffer();
-            
-            // ФИКС: Обрезаем видео до 3.5МБ, чтобы не ломать лимиты Vercel
+            const buffer = await vFetch.arrayBuffer();
+
+            // --- ШАГ 1: ЗАГРУЗКА В GOOGLE FILE API (Для анализа ПОЛНОГО видео) ---
             if (i === 0) {
-              const safeSize = 3.5 * 1024 * 1024;
-              const clippedBuffer = fullBuffer.byteLength > safeSize ? fullBuffer.slice(0, safeSize) : fullBuffer;
-              firstVideoBase64 = Buffer.from(clippedBuffer).toString('base64');
-              console.info(`[DEBUG] Video clipped for AI. Size: ${(firstVideoBase64.length / 1024).toFixed(2)} KB`);
+              console.info(`[DEBUG] Uploading FULL video to Google File API...`);
+              const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
+                method: 'POST',
+                headers: { 'X-Goog-Upload-Protocol': 'multipart' },
+                body: new Blob([buffer], { type: 'video/mp4' })
+              });
+              const uploadData = await uploadRes.json();
+              googleFileUri = uploadData.file?.uri;
+              console.info(`[DEBUG] Google File URI obtained: ${googleFileUri}`);
             }
 
+            // --- ШАГ 2: ЗАГРУЗКА В ТВОЙ SUPABASE (Для отображения в UI) ---
             const fileName = `vid_${adId}.mp4`;
-            await supabase.storage.from('ads_videos').upload(fileName, fullBuffer, { contentType: 'video/mp4', upsert: true });
+            await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
         } catch (e) { console.error(`Media fail for ${adId}`); }
@@ -58,46 +64,47 @@ export async function POST(req: Request) {
         id: adId,
         thumbnail: videoSource?.video_preview_image_url || "",
         video: storageUrl,
-        title: ad.snapshot?.title || "Mobile Ad",
+        title: ad.snapshot?.title || "Ad",
         body: ad.snapshot?.body?.text || ""
       });
     }
 
-    // ГОТОВИМ ЗАПРОС К GEMINI (v1beta + gemini-1.5-flash)
-    const promptParts: any[] = [
-      { text: `You are a Senior UA Creative Strategist. WATCH the attached video footage of the ad hook for brand: ${data[0]?.snapshot?.page_name || "this app"}.
-               
-               TASKS:
-               1. Identify the "CREATIVE CONCEPT" based on visual evidence in the footage.
-               2. Describe what happens in the VISUAL HOOK (0-3s).
-               3. Explain the MECHANICS (Match-3, Fail, ASMR, etc.) and the PSYCHOLOGY behind the visuals.
-               
-               Respond ONLY in English. Be highly descriptive about the actions seen in the video.` }
-    ];
-
-    if (firstVideoBase64) {
-      promptParts.push({ inline_data: { mime_type: "video/mp4", data: firstVideoBase64 } });
+    // --- ШАГ 3: ЖДЕМ ОБРАБОТКИ ВИДЕО (Google нужно время, чтобы "проявить" пленку) ---
+    if (googleFileUri) {
+      console.info("[DEBUG] Waiting for video processing...");
+      await new Promise(r => setTimeout(r, 8000)); // Даем 8 секунд на индексацию полного видео
     }
 
-    let strategy = "Vision analysis unavailable.";
+    // --- ШАГ 4: АНАЛИЗ ЧЕРЕЗ FILE URI ---
+    let strategy = "Vision analysis failed.";
     try {
       const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: promptParts }] })
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: `You are a Senior UA Creative Strategist. Analyze the attached full video for the brand: ${data[0]?.snapshot?.page_name}. 
+                       
+                       TASKS:
+                       1. Identify the core "CREATIVE CONCEPT".
+                       2. Break down the VISUAL HOOK (0-3s) and subsequent actions.
+                       3. Explain the MECHANICS and the PSYCHOLOGY (why players convert).
+                       
+                       Respond ONLY in English. Be extremely detailed about visual cues.` },
+              { file_data: { mime_type: "video/mp4", file_uri: googleFileUri } }
+            ]
+          }]
+        })
       });
 
       const gData = await geminiRes.json();
-      if (gData.candidates?.[0]?.content?.parts?.[0]?.text) {
-        strategy = gData.candidates[0].content.parts[0].text;
-      } else if (gData.error) {
-        console.error("[GEMINI ERROR]", JSON.stringify(gData.error));
-        strategy = `AI error: ${gData.error.message}`;
-      }
+      strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI could not process the file.";
+      if (gData.error) console.error("[GEMINI API ERROR]", gData.error.message);
     } catch (aiErr) { console.error("[AI CRASH]", aiErr); }
 
     await supabase.from('ads_library').insert([{
-      page_id: pageId, brand_name: data[0]?.snapshot?.page_name || "Mobile Brand", 
+      page_id: pageId, brand_name: data[0]?.snapshot?.page_name || "Brand", 
       strategy_analysis: strategy, creatives: processed
     }]);
 
