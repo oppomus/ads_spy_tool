@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
-export const maxDuration = 300; // Лимит Pro-плана
+export const maxDuration = 300; 
 
 export async function POST(req: Request) {
   try {
@@ -13,22 +13,16 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // ФИКС 1: Увеличиваем таймаут до 60 секунд, чтобы Apify не падал
+    // 1. Апифай (Таймаут 60 сек)
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`;
-    
-    console.info(`[PRO] Starting Scraper for ID: ${pageId}...`);
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
-        "count": 10,
-        "scrapeAdDetails": true 
-      })
+      body: JSON.stringify({ "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], "count": 10, "scrapeAdDetails": true })
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify failed or timed out.");
+    if (!Array.isArray(data)) throw new Error("Apify failed");
 
     const processed = [];
     let googleFileResource: any = null;
@@ -46,33 +40,50 @@ export async function POST(req: Request) {
           if (vFetch.ok) {
             const buffer = await vFetch.arrayBuffer();
 
-            // ФИКС 2: Простейший способ загрузки в Google (без Multipart) для обхода ошибки 400
+            // --- ШАГ 1: ЖЕЛЕЗНАЯ ЗАГРУЗКА (Resumable Protocol) ---
             if (i === 0 && !googleFileResource) {
-              console.info(`[PRO] Uploading FULL video to Google (${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB)...`);
-              const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
+              console.info(`[IRON] Initializing Resumable Upload for ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB...`);
+              
+              // Этап A: Получаем URL для загрузки
+              const startRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
-                  'X-Goog-Upload-Protocol': 'media',
-                  'Content-Type': 'video/mp4'
+                  'X-Goog-Upload-Protocol': 'resumable',
+                  'X-Goog-Upload-Command': 'start',
+                  'X-Goog-Upload-Header-Content-Type': 'video/mp4',
+                  'Content-Type': 'application/json'
                 },
-                body: new Uint8Array(buffer)
+                body: JSON.stringify({ file: { display_name: `creative_${adId}` } })
               });
 
-              if (uploadRes.ok) {
-                googleFileResource = await uploadRes.json();
-                console.info(`[PRO] Upload Success: ${googleFileResource.file?.name}`);
+              const uploadUrl = startRes.headers.get('x-goog-upload-url');
+              if (!uploadUrl) throw new Error("Failed to get Google Upload URL");
+
+              // Этап B: Загружаем бинарные данные
+              console.info(`[IRON] Sending bytes to Google...`);
+              const finalRes = await fetch(uploadUrl, {
+                method: 'POST',
+                headers: {
+                  'X-Goog-Upload-Offset': '0',
+                  'X-Goog-Upload-Command': 'upload, finalize'
+                },
+                body: Buffer.from(buffer)
+              });
+
+              if (finalRes.ok) {
+                googleFileResource = await finalRes.json();
+                console.info(`[IRON] SUCCESS: ${googleFileResource.file?.name}`);
               } else {
-                const errText = await uploadRes.text();
-                console.error(`[PRO] Google Upload Fail: ${uploadRes.status} - ${errText}`);
+                console.error(`[IRON FAIL] ${finalRes.status}: ${await finalRes.text()}`);
               }
             }
 
-            // Загрузка в Supabase
+            // SUPABASE
             const fileName = `vid_${adId}.mp4`;
             await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e: any) { console.error(`[MEDIA ERROR] ${adId}: ${e.message}`); }
+        } catch (e: any) { console.error(`[MEDIA ERR] ${e.message}`); }
       }
 
       processed.push({
@@ -84,28 +95,25 @@ export async function POST(req: Request) {
       });
     }
 
-    // ШАГ 3: Ждем готовности и анализируем
-    let strategy = "Vision analysis could not be started.";
+    // --- ШАГ 2: АНАЛИЗ ---
+    let strategy = "Vision analysis failed.";
     if (googleFileResource?.file?.name) {
       const gFileName = googleFileResource.file.name;
       
-      for (let attempt = 0; attempt < 10; attempt++) {
-        await new Promise(r => setTimeout(r, 5000)); 
+      for (let attempt = 0; attempt < 15; attempt++) {
+        await new Promise(r => setTimeout(r, 4000)); 
         const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${gFileName}?key=${geminiKey}`);
         const checkData = await checkRes.json();
         
         if (checkData.state === 'ACTIVE') {
-          console.info("[PRO] Video is ACTIVE. Starting Teardown...");
-          
+          console.info("[IRON] Video is ACTIVE. Running Teardown...");
           const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{
                 parts: [
-                  { text: `You are a Senior UA Creative Lead. WATCH this video and provide a visual teardown. 
-                           Identify: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. MECHANICS (detailed), 4. PSYCHOLOGY. 
-                           Respond ONLY in English with detailed descriptions of what happens in the video.` },
+                  { text: "You are a Senior UA Creative Strategist. WATCH this video and provide a visual teardown of: 1. CORE CONCEPT, 2. VISUAL HOOK, 3. MECHANICS, 4. PSYCHOLOGY. Respond in English only." },
                   { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
                 ]
               }]
@@ -113,10 +121,10 @@ export async function POST(req: Request) {
           });
 
           const gData = await geminiRes.json();
-          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI Error: Could not generate content.";
+          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI returned empty result.";
           break;
         }
-        console.info(`[PRO] State: ${checkData.state}. Waiting...`);
+        console.info(`[IRON] Polling ${gFileName}: ${checkData.state}`);
       }
     }
 
@@ -129,7 +137,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ brand: brandName, strategy, creatives: processed });
 
   } catch (e: any) {
-    console.error(`[CRITICAL ERROR] ${e.message}`);
+    console.error(`[CRITICAL] ${e.message}`);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
