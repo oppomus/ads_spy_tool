@@ -1,24 +1,15 @@
 'use client';
 import React, { useEffect, useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
-import ReactMarkdown from 'react-markdown';
 import Link from 'next/link';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-);
 
 export default function ArchivePage() {
   const [history, setHistory] = useState<any[]>([]);
 
   useEffect(() => {
     const fetchHistory = async () => {
-      const { data } = await supabase
-        .from('ads_library')
-        .select('*')
-        .order('created_at', { ascending: false });
-      if (data) setHistory(data);
+      const res = await fetch('/api/archive');
+      const data = await res.json();
+      if (res.ok) setHistory(data);
     };
     fetchHistory();
   }, []);
@@ -42,8 +33,8 @@ export default function ArchivePage() {
             
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
               <div className="lg:col-span-6 bg-slate-900/40 p-10 rounded-[3rem] border border-slate-800 shadow-2xl">
-                <div className="prose prose-invert prose-sm">
-                  <ReactMarkdown>{item.strategy_analysis}</ReactMarkdown>
+                <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+                  {item.strategy_analysis}
                 </div>
               </div>
               
