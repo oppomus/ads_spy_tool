@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
-export const maxDuration = 60; 
+
+// ТЕПЕРЬ МОЖНО: Vercel Pro позволяет до 300 секунд
+export const maxDuration = 300; 
 
 export async function POST(req: Request) {
   try {
@@ -13,6 +15,7 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
+    // Скрапинг объявлений
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=30&maxChargedResults=10`;
     const res = await fetch(apifyUrl, {
       method: 'POST',
@@ -21,7 +24,7 @@ export async function POST(req: Request) {
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify failed");
+    if (!Array.isArray(data)) throw new Error("Apify error");
 
     const processed = [];
     let googleFileResource: any = null;
@@ -37,42 +40,37 @@ export async function POST(req: Request) {
         try {
           const vFetch = await fetch(fbVideoUrl);
           if (vFetch.ok) {
-            // ФИКС: Используем Blob, чтобы не дублировать 14MB в памяти как ArrayBuffer
-            const videoBlob = await vFetch.blob();
-            const buffer = await videoBlob.arrayBuffer();
+            const buffer = await vFetch.arrayBuffer();
 
-            // --- ШАГ 1: ЗАГРУЗКА В GOOGLE (Максимально экономно к памяти) ---
-            if (i === 0) {
-              console.info(`[DEBUG] Attempting upload of ${videoBlob.size} bytes...`);
+            // --- ШАГ 1: ЗАГРУЗКА В GOOGLE (Для анализа) ---
+            if (i === 0 && !googleFileResource) {
+              console.info(`[PRO DEBUG] Uploading FULL video (${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB) to Google...`);
               
               const uploadRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
                   'X-Goog-Upload-Protocol': 'media',
                   'X-Goog-Upload-Header-Content-Type': 'video/mp4',
-                  'Content-Type': 'video/mp4',
-                  'Content-Length': videoBlob.size.toString() // Обязательно для больших файлов в Node.js
+                  'Content-Type': 'video/mp4'
                 },
-                body: videoBlob // Передаем Blob напрямую
+                body: new Uint8Array(buffer) // Фикс для стабильной передачи бинарных данных
               });
 
-              if (!uploadRes.ok) {
-                const errText = await uploadRes.text();
-                console.error(`[GOOGLE ERROR] ${uploadRes.status}: ${errText}`);
-              } else {
+              if (uploadRes.ok) {
                 googleFileResource = await uploadRes.json();
-                console.info(`[DEBUG] Upload Success: ${googleFileResource.file?.name}`);
+                console.info(`[PRO DEBUG] File Uploaded: ${googleFileResource.file?.name}`);
+              } else {
+                const errText = await uploadRes.text();
+                console.error(`[GOOGLE UPLOAD FAIL] ${uploadRes.status}: ${errText}`);
               }
             }
 
-            // --- ШАГ 2: SUPABASE ---
+            // --- ШАГ 2: В ТВОЙ SUPABASE (Для плеера) ---
             const fileName = `vid_${adId}.mp4`;
             await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e: any) { 
-          console.error(`[MEDIA ERROR] ${adId}: ${e.message}`); 
-        }
+        } catch (e: any) { console.error(`[MEDIA ERROR] ${adId}: ${e.message}`); }
       }
 
       processed.push({
@@ -84,28 +82,34 @@ export async function POST(req: Request) {
       });
     }
 
-    // --- ШАГ 3: ЖДЕМ И АНАЛИЗИРУЕМ ---
-    let strategy = "Vision analysis failed (File not uploaded).";
-    
+    // --- ШАГ 3: ОЖИДАНИЕ И ВИЗУАЛЬНЫЙ АНАЛИЗ ---
+    let strategy = "Vision analysis could not be started.";
+
     if (googleFileResource?.file?.name) {
       const gFileName = googleFileResource.file.name;
-      console.info(`[DEBUG] Waiting for Google to process ${gFileName}...`);
+      console.info(`[PRO DEBUG] Polling for ACTIVE state: ${gFileName}`);
       
-      // Для файлов > 10MB ждем чуть дольше
-      for (let attempt = 0; attempt < 8; attempt++) {
+      // На Pro тарифе можем ждать дольше
+      for (let attempt = 0; attempt < 10; attempt++) {
         await new Promise(r => setTimeout(r, 4000));
         const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${gFileName}?key=${geminiKey}`);
         const checkData = await checkRes.json();
         
         if (checkData.state === 'ACTIVE') {
-          console.info("[DEBUG] Video ACTIVE. Analyzing...");
+          console.info("[PRO DEBUG] Video is ACTIVE. Starting Teardown...");
+          
           const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{
                 parts: [
-                  { text: "Analyze this full mobile game ad video. Breakdown the CORE CONCEPT, VISUAL HOOK (0-3s), MECHANICS, and PSYCHOLOGY. Respond in English only." },
+                  { text: `You are a Senior UA Creative Strategist. WATCH this full video and provide a visual teardown of: 
+                           1. CREATIVE CONCEPT 
+                           2. VISUAL HOOK (0-3s) 
+                           3. STEP-BY-STEP MECHANICS (describe exactly what happens in the gameplay) 
+                           4. PSYCHOLOGY (why it converts). 
+                           Respond ONLY in English with detailed descriptions of visual elements.` },
                   { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
                 ]
               }]
@@ -113,18 +117,21 @@ export async function POST(req: Request) {
           });
 
           const gData = await geminiRes.json();
-          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI Error: Could not generate content.";
+          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI returned empty analysis.";
           break;
         }
+        console.info(`[PRO DEBUG] State: ${checkData.state} (Attempt ${attempt + 1})`);
       }
     }
 
+    // Сохранение в базу
+    const brandName = data[0]?.snapshot?.page_name || data[0]?.page_name || "Mobile Brand";
     await supabase.from('ads_library').insert([{
-      page_id: pageId, brand_name: data[0]?.snapshot?.page_name || "Brand", 
+      page_id: pageId, brand_name: brandName, 
       strategy_analysis: strategy, creatives: processed
     }]);
 
-    return NextResponse.json({ brand: data[0]?.snapshot?.page_name, strategy, creatives: processed });
+    return NextResponse.json({ brand: brandName, strategy, creatives: processed });
 
   } catch (e: any) {
     console.error(`[CRITICAL ERROR] ${e.message}`);
