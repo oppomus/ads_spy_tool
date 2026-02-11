@@ -45,7 +45,6 @@ export default function SpyMainPage() {
             <h2 className="text-5xl font-black mb-12 uppercase italic text-white">{res.brand}</h2>
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
               <div className="lg:col-span-6 bg-slate-900/40 border border-slate-800 p-10 rounded-[3rem] shadow-2xl overflow-hidden">
-                {/* whitespace-pre-wrap заменяет Markdown и сохраняет форматирование */}
                 <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
                    {res.strategy}
                 </div>
