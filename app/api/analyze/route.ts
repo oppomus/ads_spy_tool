@@ -12,14 +12,18 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. Скрапим 5 топовых видео (для глубокого анализа лучше меньше, но качественнее)
+    // Скрапинг с защитой от лишних трат
     const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}`;
+    const fbLibraryUrl = `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL`;
+
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
-        "startUrls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
-        "maxResults": 5, 
+        "startUrls": [{ "url": fbLibraryUrl }], 
+        "maxResults": 10,           // СТРОГО 10 объявлений
+        "searchPageLimit": 1,        // Только 1 страница скролла
+        "maxRequestsPerStartUrl": 1, // Никаких лишних переходов
         "isDetailedAdsView": true 
       })
     });
@@ -29,66 +33,57 @@ export async function POST(req: Request) {
 
     const processedCreatives = [];
 
-    // 2. ЦИКЛ ОБРАБОТКИ ВИДЕО
+    // Скачивание видео в Supabase Storage
     for (const ad of data) {
-      const videoUrl = ad.adCreativeVideoData?.videoUrl || ad.adSnapshotUrl;
-      let finalMediaUrl = ad.adCreativeThumbnails?.[0] || "";
+      const fbVideoUrl = ad.adCreativeVideoData?.videoUrl;
+      let storageUrl = ad.adCreativeThumbnails?.[0] || "";
 
-      if (videoUrl && videoUrl.includes('http')) {
+      if (fbVideoUrl && fbVideoUrl.includes('http')) {
         try {
-          // СКАЧИВАЕМ ВИДЕО В SUPABASE, ЧТОБЫ ОНО НЕ СГОРЕЛО
-          const videoFetch = await fetch(videoUrl);
-          const videoBlob = await videoFetch.blob();
-          const fileName = `${ad.adId}.mp4`;
+          const videoFetch = await fetch(fbVideoUrl);
+          const buffer = await videoFetch.arrayBuffer();
+          const fileName = `video-${ad.adId}.mp4`;
 
-          const { data: uploadData, error: uploadError } = await supabase.storage
-            .from('ads_videos')
-            .upload(fileName, videoBlob, { contentType: 'video/mp4', upsert: true });
+          const { error: uploadError } = await supabase.storage
+            .from('ads_videos') // Убедись, что создал Bucket в Supabase!
+            .upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
 
           if (!uploadError) {
             const { data: publicUrl } = supabase.storage.from('ads_videos').getPublicUrl(fileName);
-            finalMediaUrl = publicUrl.publicUrl;
+            storageUrl = publicUrl.publicUrl;
           }
-        } catch (e) { console.error("Video Download Error:", e); }
+        } catch (e) { console.error("Download fail:", e); }
       }
 
       processedCreatives.push({
         id: ad.adId,
-        thumbnail: ad.adCreativeThumbnails?.[0] || finalMediaUrl,
-        video: finalMediaUrl,
-        text: ad.adCopy || "No text"
+        thumbnail: ad.adCreativeThumbnails?.[0],
+        video: storageUrl, // Теперь это постоянная ссылка из твоего Supabase
+        text: ad.adCopy || "Video ad"
       });
     }
 
-    // 3. ГИПЕР-АНАЛИЗ ВИЗУАЛА ЧЕРЕЗ GEMINI
+    // Анализ визуальных концепций
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `You are a Visual Ad Analyst. I am sending you descriptions of 5 videos for brand "${data[0].pageName}".
-            Based on the creative trends in this niche, describe the VISUAL STRATEGY:
-            1. VISUAL HOOK: What visual action happens in the first 2 seconds to grab attention?
-            2. GAMEPLAY MECHANIC: What puzzle or scene is shown? (e.g., pulling pins, choosing wrong tools).
-            3. EMOTIONAL ARC: How does the video make the viewer feel?
-            4. WINNING CONCEPT: Why is this specific visual sequence scaling?
-            
-            Focus on VISUALS, not just text. Data: ${JSON.stringify(processedCreatives)}`
+            text: `Analyze the visual strategy of these 5 videos for brand "${data[0].pageName}". 
+            Describe 2-3 CORE VIDEO CONCEPTS (e.g., "Pin-Pull Fail", "Emotional Storytelling"). 
+            For each concept, specify the VISUAL HOOK (first 2s) and WHY IT WORKS.
+            Data: ${JSON.stringify(processedCreatives)}`
           }]
         }]
       })
     });
 
     const geminiData = await geminiRes.json();
-    const strategy = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Video analysis failed.";
+    const strategy = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Strategy teardown complete.";
 
-    // 4. СОХРАНЯЕМ ВСЁ В БАЗУ
     await supabase.from('ads_library').insert([{
-      page_id: pageId,
-      brand_name: data[0].pageName,
-      strategy_analysis: strategy,
-      creatives: processedCreatives
+      page_id: pageId, brand_name: data[0].pageName, strategy_analysis: strategy, creatives: processedCreatives
     }]);
 
     return NextResponse.json({ brand: data[0].pageName, strategy, creatives: processedCreatives });
