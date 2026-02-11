@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     if (!Array.isArray(data)) throw new Error("Apify error");
 
     const processed = [];
-    const visionParts = []; 
+    let firstVideoBase64 = null; // Будем хранить только ОДНО видео для анализа
 
     for (let i = 0; i < data.slice(0, 5).length; i++) {
       const ad = data[i];
@@ -47,15 +47,10 @@ export async function POST(req: Request) {
           if (vFetch.ok) {
             const buffer = await vFetch.arrayBuffer();
             
-            // ПЕРЕДАЕМ ПЕРВЫЕ 2 ВИДЕО ДЛЯ РЕАЛЬНОГО ПРОСМОТРА
-            if (i < 2) {
-              const base64Video = Buffer.from(buffer).toString('base64');
-              visionParts.push({
-                inline_data: {
-                  mime_type: "video/mp4",
-                  data: base64Video
-                }
-              });
+            // ПЕРЕДАЕМ ТОЛЬКО ПЕРВОЕ ВИДЕО, ЧТОБЫ ИИ ЕГО "УВИДЕЛ" И НЕ ПЕРЕГРУЗИЛ СЕРВЕР
+            if (i === 0 && !firstVideoBase64) {
+              firstVideoBase64 = Buffer.from(buffer).toString('base64');
+              console.info(`[DEBUG] First video encoded. Size: ${(firstVideoBase64.length / 1024).toFixed(2)} KB`);
             }
 
             const fileName = `vid_${adId}.mp4`;
@@ -79,42 +74,52 @@ export async function POST(req: Request) {
       });
     }
 
-    console.info(`[DEBUG] Sending ${visionParts.length} videos to Gemini v1beta.`);
+    // ГОТОВИМ ЧАСТИ ДЛЯ GEMINI
+    const promptParts: any[] = [
+      { text: `You are a Senior UA Creative Strategist. Analyze the visual elements of this video for the brand: ${data[0]?.snapshot?.page_name || "this app"}.
+               
+               TASKS:
+               1. Identify the "CREATIVE CONCEPT" based on visual evidence in the video.
+               2. Describe what specifically happens in the VISUAL HOOK (0-3s).
+               3. Explain the MECHANICS (Match-3, Fail, ASMR, etc.) and why the visual style works (PSYCHOLOGY).
+               
+               Respond ONLY in English. Be highly descriptive about what is seen in the footage.` }
+    ];
 
-    // --- ФИКС: ПРАВИЛЬНЫЙ ЭНДПОИНТ И СТРУКТУРА ДЛЯ VISION ---
-    let strategy = "Vision analysis failed.";
+    if (firstVideoBase64) {
+      promptParts.push({
+        inline_data: {
+          mime_type: "video/mp4",
+          data: firstVideoBase64
+        }
+      });
+    }
+
+    let strategy = "Vision analysis unavailable.";
     try {
+      // Используем стабильную комбинацию v1beta и gemini-1.5-flash
       const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{
-            parts: [
-              { text: `You are a Senior UA Creative Strategist. I have attached actual video files. 
-                       WATCH these videos and provide a visual teardown for the brand: ${data[0]?.snapshot?.page_name || "this app"}.
-                       
-                       1. Group them into logical "CREATIVE CONCEPTS".
-                       2. For EACH concept, describe what specifically happens in the VISUAL HOOK (0-3s), the STEP-BY-STEP MECHANICS (real or fake?), and the PSYCHOLOGY (why it converts).
-                       
-                       Be extremely descriptive about visual details. Respond ONLY in English.` 
-              },
-              ...visionParts
-            ]
+            parts: promptParts
           }]
         })
       });
 
       const gData = await geminiRes.json();
+      
       if (gData.candidates?.[0]?.content?.parts?.[0]?.text) {
         strategy = gData.candidates[0].content.parts[0].text;
       } else if (gData.error) {
-        console.error("[GEMINI ERROR DETAILS]", JSON.stringify(gData.error));
+        console.error("[GEMINI API ERROR DETAILS]", JSON.stringify(gData.error));
+        strategy = `AI Error: ${gData.error.message}`;
       }
     } catch (aiErr) {
       console.error("[AI CRASH]", aiErr);
     }
 
-    // Сохраняем результат в базу даже если ИИ выдал ошибку
     const brandName = data[0]?.snapshot?.page_name || "Mobile Brand";
     await supabase.from('ads_library').insert([{
       page_id: pageId, 
