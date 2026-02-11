@@ -29,7 +29,7 @@ export async function POST(req: Request) {
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify error: " + JSON.stringify(data));
+    if (!Array.isArray(data)) throw new Error("Apify error");
 
     const processed = [];
 
@@ -43,7 +43,6 @@ export async function POST(req: Request) {
 
       if (fbVideoUrl) {
         try {
-          console.log(`[LOG] Downloading video for ad: ${adId}`);
           const vFetch = await fetch(fbVideoUrl);
           if (!vFetch.ok) throw new Error("FB Link Expired");
           
@@ -56,7 +55,6 @@ export async function POST(req: Request) {
 
           if (!upError) {
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
-            console.log(`[LOG] Uploaded to Supabase: ${storageUrl}`);
           }
         } catch (e: any) { 
           console.error(`[MEDIA FAIL] ${adId}: ${e.message}`); 
@@ -66,7 +64,7 @@ export async function POST(req: Request) {
       processed.push({
         id: adId,
         thumbnail: thumbUrl || "",
-        video: storageUrl, // Передаем ЭТУ ссылку в Gemini
+        video: storageUrl,
         title: ad.snapshot?.title || "Mobile Ad",
         body: ad.snapshot?.body?.text || ""
       });
@@ -74,27 +72,23 @@ export async function POST(req: Request) {
 
     console.info(`[DEBUG] Sending ${processed.length} ads to Gemini.`);
 
-    // --- ОБНОВЛЕННЫЙ БЛОК GEMINI ---
-    const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+    // --- ФИКС: ПЕРЕКЛЮЧЕНО НА v1 ---
+    const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `You are a Senior UA Creative Strategist. Analyze the visual content of these mobile ads: ${JSON.stringify(processed)}.
+            text: `You are a Senior UA Creative Strategist. Analyze these ads: ${JSON.stringify(processed)}.
             
             TASKS:
-            1. Watch the videos using the provided 'video' links (direct MP4 links from storage).
-            2. Group ads into 2-3 logical "CREATIVE CONCEPTS" (e.g., "Failed Rescue", "ASMR Construction").
-            3. For EACH concept, provide a detailed visual teardown:
-               - VISUAL HOOK (0-3s): Exactly what happens to stop the scroll? Describe characters and actions.
-               - MECHANICS: Step-by-step gameplay description. Is it real gameplay or misleading?
-               - PSYCHOLOGY: Why does this work? (e.g., frustration, satisfaction).
+            1. Group ads into 2-3 logical "CREATIVE CONCEPTS" (e.g., "Failed Rescue", "ASMR Construction").
+            2. For EACH concept, provide a detailed breakdown in English:
+               - VISUAL HOOK (0-3s): Exactly what happens to stop the scroll?
+               - MECHANICS: Gameplay description. Is it real or fake?
+               - PSYCHOLOGY: Why does this work?
             
-            REQUIREMENTS:
-            - Respond ONLY in English.
-            - Be extremely descriptive about the VISUALS you see.
-            - Do not provide generic feedback.`
+            IMPORTANT: Respond ONLY in English. Be extremely descriptive.`
           }]
         }]
       })
@@ -102,13 +96,12 @@ export async function POST(req: Request) {
 
     const gData = await geminiRes.json();
     
-    // Дебаг ответа Gemini в логах Vercel
     if (gData.error) {
       console.error("[GEMINI API ERROR]", gData.error.message);
+      throw new Error(`Gemini Error: ${gData.error.message}`);
     }
 
-    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "No concepts detected. Check Gemini API Logs.";
-    // --- КОНЕЦ БЛОКА ---
+    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis generated.";
 
     const brandName = data[0]?.snapshot?.page_name || data[0]?.page_name || "Mobile Brand";
 
