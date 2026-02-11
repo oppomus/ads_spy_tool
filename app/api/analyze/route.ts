@@ -12,17 +12,14 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
+    // 1. Скрапим 5 топовых видео (для глубокого анализа лучше меньше, но качественнее)
     const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}`;
-    const fbLibraryUrl = `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL`;
-
-    // 1. Скрапим ТОП-10 видео (Экономим баланс!)
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
-        "startUrls": [{ "url": fbLibraryUrl }], 
-        "limit": 10, 
-        "maxRequestsPerStartUrl": 1,
+        "startUrls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
+        "maxResults": 5, 
         "isDetailedAdsView": true 
       })
     });
@@ -30,41 +27,73 @@ export async function POST(req: Request) {
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) return NextResponse.json({ error: 'No ads' }, { status: 404 });
 
-    const combinedTexts = data.map((ad, i) => `[Ad ${i+1}]: ${ad.adCopy}`).join("\n\n");
+    const processedCreatives = [];
 
-    // 2. Глубокий разбор ВИДЕО-КОНЦЕПЦИЙ БРЕНДА
+    // 2. ЦИКЛ ОБРАБОТКИ ВИДЕО
+    for (const ad of data) {
+      const videoUrl = ad.adCreativeVideoData?.videoUrl || ad.adSnapshotUrl;
+      let finalMediaUrl = ad.adCreativeThumbnails?.[0] || "";
+
+      if (videoUrl && videoUrl.includes('http')) {
+        try {
+          // СКАЧИВАЕМ ВИДЕО В SUPABASE, ЧТОБЫ ОНО НЕ СГОРЕЛО
+          const videoFetch = await fetch(videoUrl);
+          const videoBlob = await videoFetch.blob();
+          const fileName = `${ad.adId}.mp4`;
+
+          const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('ads_videos')
+            .upload(fileName, videoBlob, { contentType: 'video/mp4', upsert: true });
+
+          if (!uploadError) {
+            const { data: publicUrl } = supabase.storage.from('ads_videos').getPublicUrl(fileName);
+            finalMediaUrl = publicUrl.publicUrl;
+          }
+        } catch (e) { console.error("Video Download Error:", e); }
+      }
+
+      processedCreatives.push({
+        id: ad.adId,
+        thumbnail: ad.adCreativeThumbnails?.[0] || finalMediaUrl,
+        video: finalMediaUrl,
+        text: ad.adCopy || "No text"
+      });
+    }
+
+    // 3. ГИПЕР-АНАЛИЗ ВИЗУАЛА ЧЕРЕЗ GEMINI
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `Analyze the top 10 VIDEO ads for brand "${data[0].pageName}".
-            Identify 2-3 core "VIDEO CONCEPTS" being scaled (e.g., "Fail Motivation", "ASMR Cleanup").
-            For each concept: Name, Visual Hook (first 3s), Core Mechanic, and Psychology.
-            Provide a Brand Strategy Teardown at the end. Data: "${combinedTexts}"`
+            text: `You are a Visual Ad Analyst. I am sending you descriptions of 5 videos for brand "${data[0].pageName}".
+            Based on the creative trends in this niche, describe the VISUAL STRATEGY:
+            1. VISUAL HOOK: What visual action happens in the first 2 seconds to grab attention?
+            2. GAMEPLAY MECHANIC: What puzzle or scene is shown? (e.g., pulling pins, choosing wrong tools).
+            3. EMOTIONAL ARC: How does the video make the viewer feel?
+            4. WINNING CONCEPT: Why is this specific visual sequence scaling?
+            
+            Focus on VISUALS, not just text. Data: ${JSON.stringify(processedCreatives)}`
           }]
         }]
       })
     });
 
     const geminiData = await geminiRes.json();
-    const strategy = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Analysis complete.";
+    const strategy = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Video analysis failed.";
 
-    const creatives = data.map(ad => ({
-      id: ad.adId,
-      thumbnail: ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl,
-      link: ad.adSnapshotUrl,
-      isVideo: true 
-    }));
-
-    // 3. Сохранение в Supabase
+    // 4. СОХРАНЯЕМ ВСЁ В БАЗУ
     await supabase.from('ads_library').insert([{
-      page_id: pageId, brand_name: data[0].pageName, strategy_analysis: strategy, creatives: creatives
+      page_id: pageId,
+      brand_name: data[0].pageName,
+      strategy_analysis: strategy,
+      creatives: processedCreatives
     }]);
 
-    return NextResponse.json({ brand: data[0].pageName, strategy, creatives });
+    return NextResponse.json({ brand: data[0].pageName, strategy, creatives: processedCreatives });
+
   } catch (e: any) {
-    return NextResponse.json({ error: 'Server Error' }, { status: 500 });
+    return NextResponse.json({ error: 'System Error' }, { status: 500 });
   }
 }
