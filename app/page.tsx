@@ -1,64 +1,56 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 
-export default function MainPage() {
-  const [input, setInput] = useState('');
-  const [results, setResults] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+export default function ArchiveListPage() {
+  const [history, setHistory] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const handleAnalyze = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: input }),
-      });
-      const data = await res.json();
-      if (res.ok) setResults([data, ...results]);
-      else alert("Error: " + data.error);
-    } catch (e) { alert("Processing... Check Archive soon."); }
-    setLoading(false);
-  };
+  useEffect(() => {
+    fetch('/api/archive')
+      .then(res => res.json())
+      .then(data => {
+        setHistory(Array.isArray(data) ? data : []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-100 p-8">
-      <div className="max-w-7xl mx-auto flex justify-between items-center mb-16 border-b border-slate-800 pb-8">
-        <div>
-          <h1 className="text-4xl font-black italic uppercase text-blue-500 tracking-tighter">Spy Pro 2.0</h1>
-          <Link href="/archive" className="text-cyan-400 text-[10px] font-bold uppercase tracking-widest hover:underline mt-1 block">
-            → Open Intelligence Archive
-          </Link>
+    <div className="min-h-screen bg-[#020617] text-white p-8 font-sans">
+      <div className="max-w-4xl mx-auto">
+        <div className="flex justify-between items-center mb-12 border-b border-slate-800 pb-8">
+          <h1 className="text-3xl font-black italic uppercase text-blue-500">Intelligence Archive</h1>
+          <Link href="/" className="text-cyan-400 text-xs font-bold uppercase hover:underline">← Back to Scanner</Link>
         </div>
-        <div className="flex gap-4">
-          <input value={input} onChange={e => setInput(e.target.value)} placeholder="Enter Page ID..." className="bg-slate-900 border border-slate-800 px-6 py-3 rounded-2xl text-sm outline-none w-80" />
-          <button onClick={handleAnalyze} disabled={loading} className="bg-blue-600 hover:bg-blue-500 px-10 py-3 rounded-2xl font-black uppercase text-xs">
-            {loading ? 'Analyzing...' : 'Spy Now'}
-          </button>
-        </div>
-      </div>
 
-      <div className="max-w-7xl mx-auto space-y-24">
-        {results.map((res, i) => (
-          <div key={i} className="animate-in fade-in slide-in-from-bottom-8">
-            <h2 className="text-5xl font-black mb-12 uppercase italic">{res.brand}</h2>
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
-              <div className="lg:col-span-6 bg-slate-900/40 border border-slate-800 p-10 rounded-[3rem] shadow-2xl overflow-hidden">
-                <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap font-sans">
-                   {res.strategy}
+        {loading ? (
+          <div className="text-center py-20 opacity-50 uppercase tracking-widest text-xs animate-pulse">Loading Database...</div>
+        ) : history.length === 0 ? (
+          <div className="text-center py-20 opacity-20 uppercase font-black text-4xl">No Intel Found</div>
+        ) : (
+          <div className="grid gap-4">
+            {history.map((item) => (
+              <button 
+                key={item.id} 
+                onClick={() => window.location.href = `/archive/${item.id}`}
+                className="w-full text-left group bg-slate-900/50 border border-slate-800 p-6 rounded-2xl hover:border-blue-500/50 transition-all flex justify-between items-center"
+              >
+                <div>
+                  <h2 className="text-xl font-bold uppercase italic group-hover:text-blue-400 transition-colors">
+                    {item.brand_name || 'Unknown Brand'}
+                  </h2>
+                  <p className="text-slate-500 text-[10px] font-mono mt-1 uppercase">
+                    {new Date(item.created_at).toLocaleString()}
+                  </p>
                 </div>
-              </div>
-              <div className="lg:col-span-6 grid grid-cols-2 gap-4">
-                {res.creatives.map((ad: any) => (
-                  <div key={ad.id} className="aspect-[9/16] bg-black rounded-[2rem] overflow-hidden border border-slate-800 shadow-xl relative">
-                    <video src={ad.video} poster={ad.thumbnail} controls preload="metadata" className="h-full w-full object-cover" />
-                  </div>
-                ))}
-              </div>
-            </div>
+                <div className="bg-slate-800 px-4 py-2 rounded-xl text-[10px] font-black uppercase text-slate-400 group-hover:bg-blue-600 group-hover:text-white transition-all">
+                  {item.creatives?.length || 0} ADS FOUND →
+                </div>
+              </button>
+            ))}
           </div>
-        ))}
+        )}
       </div>
     </div>
   );
