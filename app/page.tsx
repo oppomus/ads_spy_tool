@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 
-export default function TownshipSpy() {
+export default function VibeSpyMain() {
   const [input, setInput] = useState('');
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -18,7 +18,7 @@ export default function TownshipSpy() {
       const data = await res.json();
       if (res.ok) setResults([data, ...results]);
       else alert("Error: " + data.error);
-    } catch (e) { alert("Timeout. Apify is slow, check Archive later."); }
+    } catch (e) { alert("Timeout. Results will be in Archive."); }
     setLoading(false);
   };
 
@@ -27,14 +27,15 @@ export default function TownshipSpy() {
       <div className="max-w-7xl mx-auto flex justify-between items-center mb-16">
         <div>
           <h1 className="text-4xl font-black italic uppercase text-blue-500 tracking-tighter">Spy Pro 2.0</h1>
-          <Link href="/archive" className="text-cyan-400 text-[10px] font-bold uppercase tracking-widest hover:underline block mt-1">
+          {/* ССЫЛКА НА АРХИВ */}
+          <Link href="/archive" className="text-cyan-400 text-xs font-bold uppercase tracking-widest hover:underline block mt-1">
             → Open Intelligence Archive
           </Link>
         </div>
         <div className="flex gap-2">
-          <input value={input} onChange={e => setInput(e.target.value)} placeholder="Page ID (e.g. 131427027065541)" className="bg-slate-900 border border-slate-800 px-6 py-2 rounded-xl text-sm" />
+          <input value={input} onChange={e => setInput(e.target.value)} placeholder="Page ID..." className="bg-slate-900 border border-slate-800 px-6 py-2 rounded-xl text-sm outline-none" />
           <button onClick={handleAnalyze} disabled={loading} className="bg-blue-600 hover:bg-blue-500 px-8 py-2 rounded-xl font-bold uppercase text-xs transition-all">
-            {loading ? 'Crunching Video...' : 'Spy Now'}
+            {loading ? 'Processing...' : 'Spy Now'}
           </button>
         </div>
       </div>
@@ -44,7 +45,7 @@ export default function TownshipSpy() {
           <div key={i} className="bg-slate-900/50 border border-slate-800 rounded-[3rem] p-10 shadow-2xl animate-in fade-in slide-in-from-bottom-4">
             <h2 className="text-4xl font-black mb-8 uppercase italic">{res.brand}</h2>
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-              <div className="lg:col-span-5 bg-black/40 p-8 rounded-3xl text-sm italic text-slate-300 border border-slate-800 whitespace-pre-wrap leading-relaxed">
+              <div className="lg:col-span-5 bg-black/40 p-8 rounded-3xl text-sm italic text-slate-300 border border-slate-800 whitespace-pre-wrap">
                 {res.strategy}
               </div>
               <div className="lg:col-span-7 grid grid-cols-2 sm:grid-cols-3 gap-4">
@@ -54,8 +55,8 @@ export default function TownshipSpy() {
                       <video src={ad.video} controls className="h-full w-full object-cover" poster={ad.thumbnail} />
                     ) : (
                       <div className="flex flex-col items-center justify-center h-full p-4 text-center">
-                         <img src={ad.thumbnail} className="opacity-30 mb-2" alt="Thumb" />
-                         <span className="text-[10px] text-red-500 font-bold uppercase italic">No Video Saved</span>
+                         <img src={ad.thumbnail} className="opacity-30 mb-2" alt="ad" />
+                         <span className="text-[10px] text-red-500 font-bold uppercase italic">Video Save Fail</span>
                       </div>
                     )}
                   </div>
