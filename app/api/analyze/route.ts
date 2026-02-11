@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     const processed = [];
     let googleFileResource: any = null;
 
-    for (let i = 0; i < data.slice(0, 5).length; i++) {
+    for (let i = 0; i < data.slice(0, 10).length; i++) {
       const ad = data[i];
       const adId = ad.ad_archive_id;
       const videoSource = ad.snapshot?.videos?.[0] || ad.snapshot?.cards?.[0];
