@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
-export const maxDuration = 60;
+export const maxDuration = 60; // Видео-анализ требует времени
 
 export async function POST(req: Request) {
   try {
@@ -16,8 +16,6 @@ export async function POST(req: Request) {
 
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=30&maxChargedResults=10`;
     
-    console.log(`[LOG] Starting analysis for Page ID: ${pageId}`);
-
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -32,23 +30,36 @@ export async function POST(req: Request) {
     if (!Array.isArray(data)) throw new Error("Apify error");
 
     const processed = [];
+    const visionParts = []; // Сюда мы положим видео-данные для Gemini
 
-    for (const ad of data.slice(0, 5)) {
+    for (let i = 0; i < data.slice(0, 5).length; i++) {
+      const ad = data[i];
       const adId = ad.ad_archive_id;
       const videoSource = ad.snapshot?.videos?.[0] || ad.snapshot?.cards?.[0];
       const fbVideoUrl = videoSource?.video_hd_url || videoSource?.video_sd_url;
-      const thumbUrl = videoSource?.video_preview_image_url || ad.snapshot?.images?.[0]?.resized_image_url;
+      const thumbUrl = videoSource?.video_preview_image_url;
       
       let storageUrl = null;
 
       if (fbVideoUrl) {
         try {
           const vFetch = await fetch(fbVideoUrl);
-          if (!vFetch.ok) throw new Error("FB Link Expired");
+          if (!vFetch.ok) throw new Error("Link expired");
           
           const buffer = await vFetch.arrayBuffer();
-          const fileName = `vid_${adId}.mp4`;
+          
+          // ДЛЯ GEMINI: Кодируем первые 2 видео в Base64 для "просмотра"
+          if (i < 2) {
+            const base64Video = Buffer.from(buffer).toString('base64');
+            visionParts.push({
+              inline_data: {
+                mime_type: "video/mp4",
+                data: base64Video
+              }
+            });
+          }
 
+          const fileName = `vid_${adId}.mp4`;
           const { error: upError } = await supabase.storage
             .from('ads_videos')
             .upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
@@ -57,7 +68,7 @@ export async function POST(req: Request) {
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
         } catch (e: any) { 
-          console.error(`[MEDIA FAIL] ${adId}: ${e.message}`); 
+          console.error(`Media fail for ${adId}`); 
         }
       }
 
@@ -70,49 +81,46 @@ export async function POST(req: Request) {
       });
     }
 
-    console.info(`[DEBUG] Sending ${processed.length} ads to Gemini.`);
+    console.info(`[DEBUG] Sending ${visionParts.length} videos for REAL visual analysis.`);
 
-    // --- ФИКС: ПЕРЕКЛЮЧЕНО НА v1 ---
+    // --- ФИКС: ТЕПЕРЬ МЫ ПЕРЕДАЕМ ВИДЕО-ДАННЫЕ ---
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
-          parts: [{
-            text: `You are a Senior UA Creative Strategist. Analyze these ads: ${JSON.stringify(processed)}.
+          parts: [
+            { text: `You are a Senior UA Creative Strategist. I have attached the actual video files of the ads. 
+                     Watch these videos and analyze their creative strategies for brand: ${data[0]?.snapshot?.page_name}.
             
-            TASKS:
-            1. Group ads into 2-3 logical "CREATIVE CONCEPTS" (e.g., "Failed Rescue", "ASMR Construction").
-            2. For EACH concept, provide a detailed breakdown in English:
-               - VISUAL HOOK (0-3s): Exactly what happens to stop the scroll?
-               - MECHANICS: Gameplay description. Is it real or fake?
-               - PSYCHOLOGY: Why does this work?
+                     TASKS:
+                     1. Group them into logical "CREATIVE CONCEPTS".
+                     2. For EACH concept, provide a visual teardown based ONLY on what you see in the videos:
+                        - VISUAL HOOK (0-3s): Describe exactly what happens.
+                        - MECHANICS: Gameplay actions. Is it real or fake?
+                        - PSYCHOLOGY: Why does this work?
             
-            IMPORTANT: Respond ONLY in English. Be extremely descriptive.`
-          }]
+                     Respond ONLY in English. Be extremely descriptive about the visual elements.` 
+            },
+            ...visionParts // Это и есть "зрение" — бинарные данные видео
+          ]
         }]
       })
     });
 
     const gData = await geminiRes.json();
-    
-    if (gData.error) {
-      console.error("[GEMINI API ERROR]", gData.error.message);
-      throw new Error(`Gemini Error: ${gData.error.message}`);
-    }
+    if (gData.error) throw new Error(gData.error.message);
 
-    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis generated.";
-
-    const brandName = data[0]?.snapshot?.page_name || data[0]?.page_name || "Mobile Brand";
+    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Vision analysis failed.";
 
     await supabase.from('ads_library').insert([{
       page_id: pageId, 
-      brand_name: brandName, 
+      brand_name: data[0]?.snapshot?.page_name || "Mobile Brand", 
       strategy_analysis: strategy, 
       creatives: processed
     }]);
 
-    return NextResponse.json({ brand: brandName, strategy, creatives: processed });
+    return NextResponse.json({ brand: data[0]?.snapshot?.page_name, strategy, creatives: processed });
 
   } catch (e: any) {
     console.error(`[CRITICAL ERROR] ${e.message}`);
