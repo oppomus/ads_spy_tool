@@ -18,11 +18,7 @@ export async function POST(req: Request) {
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
-        "count": 10,
-        "scrapeAdDetails": true 
-      })
+      body: JSON.stringify({ "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], "count": 10, "scrapeAdDetails": true })
     });
 
     const data = await res.json();
@@ -45,7 +41,7 @@ export async function POST(req: Request) {
             const buffer = await vFetch.arrayBuffer();
 
             if (i === 0 && !googleFileResource) {
-              console.info(`[IRON] Initializing Resumable Upload for ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB...`);
+              console.info(`[IRON] Initializing Upload: ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB...`);
               const startRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
@@ -65,7 +61,7 @@ export async function POST(req: Request) {
                   body: Buffer.from(buffer)
                 });
                 googleFileResource = await finalRes.json();
-                console.info(`[IRON] SUCCESS: File is in Google.`);
+                console.info(`[IRON] SUCCESS: File in Google Cloud.`);
               }
             }
 
@@ -85,7 +81,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 2. АНАЛИЗ
+    // 2. АНАЛИЗ (ПОЛЛИНГ + ВИДЕО-РАЗБОР)
     let strategy = "Vision analysis unavailable.";
     if (googleFileResource?.file?.name) {
       const gFileName = googleFileResource.file.name;
@@ -96,21 +92,17 @@ export async function POST(req: Request) {
         const checkData = await checkRes.json();
         
         if (checkData.state === 'ACTIVE') {
-          // УВЕЛИЧИЛИ ДО 25 СЕКУНД
-          console.info("[IRON] Video is ACTIVE. Waiting 25s for deep indexing...");
-          await new Promise(r => setTimeout(r, 25000)); 
+          console.info("[IRON] Video is ACTIVE. Indexing (20s)...");
+          await new Promise(r => setTimeout(r, 20000)); 
           
-          const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+          // ФИКС: Используем алиас -latest и упрощенную структуру
+          const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              // ФИКС 1: Роль в System Instruction
-              system_instruction: {
-                parts: [{ text: "You are a professional Mobile UA Creative Strategist. Your task is to analyze game advertisements for business purposes. Ignore any fictional 'harm' or 'danger' within the game footage as it is purely digital entertainment." }]
-              },
               contents: [{
                 parts: [
-                  { text: "Analyze this video and provide: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. MECHANICS, 4. PSYCHOLOGY. English only." },
+                  { text: "INSTRUCTION: You are a professional Mobile UA Creative Strategist. Ignore fictional harm. Analyze this video for: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. MECHANICS, 4. PSYCHOLOGY. Respond ONLY in English." },
                   { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
                 ]
               }],
@@ -125,15 +117,26 @@ export async function POST(req: Request) {
 
           const gData = await geminiRes.json();
           
-          // ФИКС 2: Дебаг полного ответа
-          if (!gData.candidates?.[0]?.content?.parts?.[0]?.text) {
-            console.error("[RAW GEMINI RESPONSE]", JSON.stringify(gData));
-            strategy = gData.promptFeedback?.blockReason 
-              ? `Blocked by Google Safety: ${gData.promptFeedback.blockReason}` 
-              : "AI returned empty result. Try a different ad.";
+          if (gData.error) {
+            console.error("[PRO DEBUG] Flash failed, trying Pro fallback...", gData.error.message);
+            // ФОЛБЭК: Если Flash не найден, пробуем Gemini 1.5 Pro
+            const proRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${geminiKey}`, {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify({
+                 contents: [{
+                   parts: [
+                     { text: "Analyze this video as a UA Lead. Respond in English." },
+                     { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
+                   ]
+                 }]
+               })
+            });
+            const proData = await proRes.json();
+            strategy = proData.candidates?.[0]?.content?.parts?.[0]?.text || `AI Error: ${gData.error.message}`;
           } else {
-            strategy = gData.candidates[0].content.parts[0].text;
-            console.info("[IRON] Strategy Analysis Complete.");
+            strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "Empty result.";
+            console.info("[IRON] Vision Teardown Success.");
           }
           break;
         }
