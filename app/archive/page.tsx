@@ -1,53 +1,63 @@
 'use client';
 import React, { useEffect, useState } from 'react';
+import { createClient } from '@supabase/supabase-js';
+import ReactMarkdown from 'react-markdown';
 import Link from 'next/link';
 
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+);
+
 export default function ArchivePage() {
-  const [items, setItems] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [history, setHistory] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch('/api/archive').then(res => res.json()).then(data => { setItems(data); setLoading(false); });
+    const fetchHistory = async () => {
+      const { data } = await supabase
+        .from('ads_library')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (data) setHistory(data);
+    };
+    fetchHistory();
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-100 p-8 font-sans">
-      <div className="max-w-7xl mx-auto flex justify-between items-center mb-16">
-        <div>
-          <Link href="/" className="text-blue-500 text-xs font-bold uppercase tracking-widest hover:underline">← Back to Spy Tool</Link>
-          <h1 className="text-4xl font-black text-white italic uppercase tracking-tighter mt-2">Intelligence Archive</h1>
-        </div>
-        <div className="text-right">
-          <p className="text-slate-500 text-xs font-bold uppercase tracking-widest italic">Total Analyzed Brands</p>
-          <p className="text-4xl font-black text-blue-500">{items.length}</p>
-        </div>
+    <div className="min-h-screen bg-[#020617] text-white p-8">
+      <div className="max-w-7xl mx-auto mb-16 flex items-center justify-between">
+        <Link href="/" className="text-cyan-400 uppercase text-[10px] font-bold tracking-widest hover:underline">
+          ← Back to Scanner
+        </Link>
+        <h1 className="text-2xl font-black italic uppercase text-blue-500">Intelligence Archive</h1>
       </div>
 
-      {loading ? (
-        <div className="text-center py-20 text-slate-500 font-black uppercase tracking-widest animate-pulse">Accessing Secure Storage...</div>
-      ) : (
-        <div className="max-w-7xl mx-auto space-y-12">
-          {items.map((res, i) => (
-            <div key={i} className="bg-[#0f172a] border border-slate-800 rounded-[3rem] p-10 shadow-2xl">
-              <h2 className="text-4xl font-black uppercase italic mb-10">{res.brand_name}</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
-                <div className="lg:col-span-5">
-                  <h3 className="text-blue-500 text-xs font-bold uppercase mb-4 tracking-widest">Archived Strategy Analysis</h3>
-                  <div className="bg-slate-900/60 border border-slate-800 p-8 rounded-[2rem] text-slate-300 text-sm leading-relaxed italic whitespace-pre-wrap">{res.strategy_analysis}</div>
-                </div>
-                <div className="lg:col-span-7">
-                  <h3 className="text-slate-500 text-xs font-bold uppercase mb-4 tracking-widest">Creative Snapshot</h3>
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
-                    {res.creatives?.map((ad: any, idx: number) => (
-                      <a key={idx} href={ad.link} target="_blank" className="relative aspect-[9/16] bg-black rounded-2xl overflow-hidden border border-slate-800"><img src={ad.thumbnail} alt="" className="w-full h-full object-cover opacity-60" /></a>
-                    ))}
-                  </div>
+      <div className="max-w-7xl mx-auto space-y-32">
+        {history.map((item) => (
+          <div key={item.id} className="border-t border-slate-800 pt-16">
+            <div className="flex justify-between items-baseline mb-12">
+              <h2 className="text-5xl font-black uppercase italic">{item.brand_name}</h2>
+              <span className="text-slate-500 text-xs font-mono">{new Date(item.created_at).toLocaleDateString()}</span>
+            </div>
+            
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
+              <div className="lg:col-span-6 bg-slate-900/40 p-10 rounded-[3rem] border border-slate-800 shadow-2xl">
+                <div className="prose prose-invert prose-sm">
+                  <ReactMarkdown>{item.strategy_analysis}</ReactMarkdown>
                 </div>
               </div>
+              
+              <div className="lg:col-span-6 grid grid-cols-2 gap-4">
+                {item.creatives?.map((ad: any) => (
+                  <div key={ad.id} className="aspect-[9/16] bg-black rounded-[2rem] overflow-hidden border border-slate-800">
+                    <video src={ad.video} poster={ad.thumbnail} controls preload="metadata" className="h-full w-full object-cover" />
+                  </div>
+                ))}
+              </div>
             </div>
-          ))}
-        </div>
-      )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
