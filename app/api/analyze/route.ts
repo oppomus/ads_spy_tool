@@ -3,8 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
-// МАКСИМУМ для Vercel Hobby — 60 секунд.
-export const maxDuration = 60; 
+export const maxDuration = 60; // Максимум для Hobby
 
 export async function POST(req: Request) {
   try {
@@ -15,38 +14,44 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // ПРИМЕНЕНА ИНСТРУКЦИЯ API: Добавляем лимит прямо в URL и ставим таймаут меньше Vercel
-    const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}&timeout=45&limit=5`;
-    
-    const res = await fetch(apifyUrl, {
+    // 1. ПРИНУДИТЕЛЬНЫЙ ЛИМИТ: Запускаем задачу с жесткими параметрами
+    // Мы используем run, а не run-sync, чтобы не зависеть от тормозов Apify
+    const runRes = await fetch(`https://api.apify.com/v2/acts/apify~facebook-ads-scraper/runs?token=${token}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
         "startUrls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
-        "maxResults": 5,           // Берем ТОЛЬКО 5 объявлений для скорости
-        "searchPageLimit": 1,        // СТРОГО ПЕРВАЯ СТРАНИЦА
-        "maxRequestsPerStartUrl": 1,
-        "isDetailedAdsView": true    // Нужно для видео
+        "maxResults": 10,           // СТРОГО 10 штук
+        "searchPageLimit": 1,        // ТОЛЬКО 1 СТРАНИЦА
+        "isDetailedAdsView": true 
       })
     });
 
-    const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) throw new Error("Apify failed or too slow");
+    const runData = await runRes.json();
+    const runId = runData.data.id;
+
+    // 2. ЖДЕМ 20 СЕКУНД И ЗАБИРАЕМ ЧТО ЕСТЬ
+    await new Promise(resolve => setTimeout(resolve, 20000));
+
+    const itemsRes = await fetch(`https://api.apify.com/v2/acts/apify~facebook-ads-scraper/runs/${runId}/dataset/items?token=${token}`);
+    const data = await itemsRes.json();
+
+    if (!Array.isArray(data) || data.length === 0) throw new Error("Apify failed to collect data in 20s.");
 
     const processed = [];
 
-    // СОХРАНЕНИЕ ВИДЕО
+    // 3. БЫСТРАЯ ЗАГРУЗКА ВИДЕО (Берем только первые 5 для надежности)
     for (const ad of data.slice(0, 5)) {
-      const fbVideoUrl = ad.adCreativeVideoData?.videoUrl;
+      const fbVideo = ad.adCreativeVideoData?.videoUrl;
       let storageUrl = null;
 
-      if (fbVideoUrl) {
+      if (fbVideo) {
         try {
-          const vFetch = await fetch(fbVideoUrl);
-          const buffer = await vFetch.arrayBuffer();
+          const vRes = await fetch(fbVideo);
+          const buffer = await vRes.arrayBuffer();
           const fileName = `vid_${ad.adId}.mp4`;
 
-          // Используем service_role ключ, он запишет файл без проблем
+          // Загрузка через service_role_key (игнорирует политики INSERT)
           const { error: upError } = await supabase.storage
             .from('ads_videos')
             .upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
@@ -54,25 +59,27 @@ export async function POST(req: Request) {
           if (!upError) {
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e) { console.error("Video fail:", ad.adId); }
+        } catch (e) { console.error("Upload error:", ad.adId); }
       }
 
       processed.push({
         id: ad.adId,
-        thumbnail: ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl || "",
-        video: storageUrl,
-        text: ad.adCopy || "Gameplay"
+        thumbnail: ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl,
+        video: storageUrl, // Будет null, если не успели сохранить
+        text: ad.adCopy || "Ad creative"
       });
     }
 
-    // АНАЛИЗ GEMINI
+    // 4. ГЛУБОКИЙ АНАЛИЗ GEMINI
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `Analyze 2-3 visual hooks for brand "${data[0].pageName}". Explain Hook (first 2s) and Psychology. Data: ${JSON.stringify(processed)}`
+            text: `You are a UA Expert. Analyze these 5 videos for brand "${data[0].pageName}".
+            Break down 3 visual concepts: Hook (first 2s) and Psychology.
+            Data: ${JSON.stringify(processed)}`
           }]
         }]
       })
@@ -81,7 +88,7 @@ export async function POST(req: Request) {
     const gData = await geminiRes.json();
     const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Strategy ready.";
 
-    // Сохранение в архив
+    // 5. ПИШЕМ В БАЗУ
     await supabase.from('ads_library').insert([{
       page_id: pageId, brand_name: data[0].pageName, strategy_analysis: strategy, creatives: processed
     }]);
