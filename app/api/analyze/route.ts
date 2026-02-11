@@ -3,7 +3,6 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
-// ВАЖНО: Для Vercel Hobby лимит 10-15 сек. Поставим 60, но старайся не грузить много
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
@@ -15,7 +14,6 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // Уменьшаем таймаут запроса к Apify, чтобы уложиться в лимиты сервера
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=30&maxChargedResults=10`;
     
     console.log(`[LOG] Starting analysis for Page ID: ${pageId}`);
@@ -35,11 +33,8 @@ export async function POST(req: Request) {
 
     const processed = [];
 
-    // ОБРАБОТКА: Сделали поиск видео более гибким (ищем и в videos, и в cards)
     for (const ad of data.slice(0, 5)) {
       const adId = ad.ad_archive_id;
-      
-      // Проверяем оба возможных места нахождения видео в JSON
       const videoSource = ad.snapshot?.videos?.[0] || ad.snapshot?.cards?.[0];
       const fbVideoUrl = videoSource?.video_hd_url || videoSource?.video_sd_url;
       const thumbUrl = videoSource?.video_preview_image_url || ad.snapshot?.images?.[0]?.resized_image_url;
@@ -62,8 +57,6 @@ export async function POST(req: Request) {
           if (!upError) {
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
             console.log(`[LOG] Uploaded to Supabase: ${storageUrl}`);
-          } else {
-            console.error(`[STORAGE ERROR] ${upError.message}`);
           }
         } catch (e: any) { 
           console.error(`[MEDIA FAIL] ${adId}: ${e.message}`); 
@@ -73,40 +66,51 @@ export async function POST(req: Request) {
       processed.push({
         id: adId,
         thumbnail: thumbUrl || "",
-        video: storageUrl,
-        rawVideoUrl: fbVideoUrl,
+        video: storageUrl, // Передаем ЭТУ ссылку в Gemini
         title: ad.snapshot?.title || "Mobile Ad",
         body: ad.snapshot?.body?.text || ""
       });
     }
 
-    // GEMINI: Усилили промпт, чтобы ИИ реально анализировал КОНЦЕПТЫ
+    console.info(`[DEBUG] Sending ${processed.length} ads to Gemini.`);
+
+    // --- ОБНОВЛЕННЫЙ БЛОК GEMINI ---
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `You are a Senior UA Creative Lead. Task: Conduct a visual teardown of these ads: ${JSON.stringify(processed)}. 
+            text: `You are a Senior UA Creative Strategist. Analyze the visual content of these mobile ads: ${JSON.stringify(processed)}.
             
-            Analyze the videos via 'rawVideoUrl' and group them into 2-3 logical "CREATIVE CONCEPTS" (e.g., "Failed Rescue", "ASMR Construction").
+            TASKS:
+            1. Watch the videos using the provided 'video' links (direct MP4 links from storage).
+            2. Group ads into 2-3 logical "CREATIVE CONCEPTS" (e.g., "Failed Rescue", "ASMR Construction").
+            3. For EACH concept, provide a detailed visual teardown:
+               - VISUAL HOOK (0-3s): Exactly what happens to stop the scroll? Describe characters and actions.
+               - MECHANICS: Step-by-step gameplay description. Is it real gameplay or misleading?
+               - PSYCHOLOGY: Why does this work? (e.g., frustration, satisfaction).
             
-            For EACH concept, provide:
-            1. VISUAL HOOK (0-3s): Explain what happens and the 'Final Hook'.
-            2. MECHANICS: Step-by-step gameplay description. Is it Real or Misleading?
-            3. PSYCHOLOGY: Why does this hook the player (frustration, satisfaction, etc.)?
-            
-            Respond ONLY in English. Use clear headers and lists. Do not use generic phrases like "Analysis ready".`
+            REQUIREMENTS:
+            - Respond ONLY in English.
+            - Be extremely descriptive about the VISUALS you see.
+            - Do not provide generic feedback.`
           }]
         }]
       })
     });
 
     const gData = await geminiRes.json();
-    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "No concepts detected.";
+    
+    // Дебаг ответа Gemini в логах Vercel
+    if (gData.error) {
+      console.error("[GEMINI API ERROR]", gData.error.message);
+    }
 
-    // Сохранение в базу
-    const brandName = data[0]?.snapshot?.page_name || data[0]?.page_name || "Township Mobile";
+    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "No concepts detected. Check Gemini API Logs.";
+    // --- КОНЕЦ БЛОКА ---
+
+    const brandName = data[0]?.snapshot?.page_name || data[0]?.page_name || "Mobile Brand";
 
     await supabase.from('ads_library').insert([{
       page_id: pageId, 
