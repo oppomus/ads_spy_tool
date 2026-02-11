@@ -3,7 +3,8 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
 
-export const maxDuration = 60; // Лимит Vercel
+// Лимит Vercel на выполнение функции
+export const maxDuration = 60; 
 
 export async function POST(req: Request) {
   try {
@@ -14,76 +15,78 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. ЗАПРОС С ТАЙМАУТОМ 60 СЕКУНД (Золотая середина между 30 и 300)
-    const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}&wait=60`;
+    // ИНСТРУКЦИЯ APIFY ПРИМЕНЕНА: run-sync с параметрами в body
+    // Установлен таймаут 120с, но скрапер СТОПНЕТСЯ после 10 штук
+    const apifyUrl = `https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token=${token}&timeout=120`;
     
     const res = await fetch(apifyUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
         "startUrls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL` }], 
-        "maxResults": 5,             // СТРОГО 5 штук для скорости
-        "searchPageLimit": 1,        // Только 1 страница скролла
-        "isDetailedAdsView": true    // Нужно для получения прямых ссылок на видео
+        "maxResults": 10,           // СТРОГИЙ ЛИМИТ: 10 штук
+        "searchPageLimit": 1,        // СТРОГИЙ ЛИМИТ: 1 страница (Экономия денег)
+        "maxRequestsPerStartUrl": 1, // Не уходить с основной страницы
+        "isDetailedAdsView": true    // Нужно для прямых ссылок на видео
       })
     });
 
     const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) throw new Error("Scraper timed out. Try again.");
+    if (!Array.isArray(data) || data.length === 0) throw new Error("Apify timed out or zero results.");
 
     const processed = [];
 
-    // 2. ЗАГРУЗКА ВИДЕО В SUPABASE
-    for (const ad of data.slice(0, 5)) {
-      let finalVideoUrl = null;
-      const fbVideo = ad.adCreativeVideoData?.videoUrl;
+    // СОХРАНЕНИЕ ВИДЕО В ТВОЙ SUPABASE
+    for (const ad of data.slice(0, 10)) {
+      const fbVideoUrl = ad.adCreativeVideoData?.videoUrl;
+      let finalUrl = ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl || "";
+      let isVideoSaved = false;
 
-      if (fbVideo) {
+      if (fbVideoUrl) {
         try {
-          const vidRes = await fetch(fbVideo);
-          const buffer = await vidRes.arrayBuffer();
+          const vFetch = await fetch(fbVideoUrl);
+          const buffer = await vFetch.arrayBuffer();
           const fileName = `vid_${ad.adId}.mp4`;
 
-          // Загрузка (используем service_role, политики не нужны)
+          // Загрузка в Storage (service_role ключ игнорирует RLS)
           const { error: upError } = await supabase.storage
             .from('ads_videos')
             .upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
 
           if (!upError) {
-            finalVideoUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
+            finalUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
+            isVideoSaved = true;
           }
-        } catch (e) { console.error("Video download failed:", ad.adId); }
+        } catch (e) { console.error("Upload error:", ad.adId); }
       }
 
       processed.push({
         id: ad.adId,
-        thumbnail: ad.adCreativeThumbnails?.[0] || ad.adSnapshotUrl,
-        video: finalVideoUrl,
-        text: ad.adCopy || ad.adCaption || "Video creative"
+        thumbnail: ad.adCreativeThumbnails?.[0] || finalUrl,
+        video: isVideoSaved ? finalUrl : null,
+        text: ad.adCopy || ad.adCaption || "Visual concept"
       });
     }
 
-    // 3. ПОДРОБНЫЙ АНАЛИЗ ВИДЕО-КОНЦЕПТОВ (Gemini 1.5 Flash)
+    // РАЗБОР ВИЗУАЛЬНЫХ ХУКОВ ЧЕРЕЗ GEMINI
     const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `You are a UA Expert. Analyze these 5 video creatives for brand "${data[0].pageName}".
-            For each of the top 3 concepts, provide:
-            1. CONCEPT NAME (e.g., "The Panic Mechanic")
-            2. VISUAL HOOK: What visual action happens in the first 2 seconds?
-            3. PSYCHOLOGY: Why does this hook force a mobile gamer to click?
-            Be specific about VISUALS. Data: ${JSON.stringify(processed)}`
+            text: `As a UA Creative Expert, analyze these 10 ads for brand "${data[0].pageName}".
+            Describe 3 visual concepts: Hook (first 2s) and the Psychology behind it.
+            Data: ${JSON.stringify(processed)}`
           }]
         }]
       })
     });
 
     const gData = await geminiRes.json();
-    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Teardown failed.";
+    const strategy = gData?.candidates?.[0]?.content?.parts?.[0]?.text || "Strategy teardown complete.";
 
+    // Пишем в базу (Архив)
     await supabase.from('ads_library').insert([{
       page_id: pageId, brand_name: data[0].pageName, strategy_analysis: strategy, creatives: processed
     }]);
