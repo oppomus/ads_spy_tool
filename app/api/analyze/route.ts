@@ -14,15 +14,14 @@ export async function POST(req: Request) {
     const { url } = await req.json();
     const token = process.env.APIFY_TOKEN;
     
-    // ТВОЙ РАБОЧИЙ КЛЮЧ (Hardcoded for stability)
+    // РАБОЧИЙ КЛЮЧ (Захардкожен по просьбе для теста)
     const geminiKey = "AIzaSyB2Jc3tFV5cwYLjUBDqwAjgClGhwMv8cB8"; 
 
-    // Извлекаем ID страницы из ссылки
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. СКРЕПИНГ: Берем Топ-10 объявлений по просмотрам
-    console.info(`[STEP 1] Scraping top 10 ads for: ${pageId}`);
+    // 1. СКРЕПИНГ (Apify)
+    console.info(`[1/4] Starting Scraper for Page ID: ${pageId}`);
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`;
     
     const res = await fetch(apifyUrl, {
@@ -38,12 +37,13 @@ export async function POST(req: Request) {
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Failed to get data from Apify.");
+    if (!Array.isArray(data)) throw new Error("Apify failed to return data array.");
 
     const processed = [];
     let googleFileResource: any = null;
 
     // 2. ОБРАБОТКА МЕДИА
+    console.info(`[2/4] Processing ${data.length} creatives...`);
     for (let i = 0; i < data.slice(0, 10).length; i++) {
       const ad = data[i];
       const adId = ad.ad_archive_id;
@@ -58,47 +58,34 @@ export async function POST(req: Request) {
             const arrayBuffer = await vFetch.arrayBuffer();
             const uint8Array = new Uint8Array(arrayBuffer);
 
-            // ЗАГРУЗКА В GOOGLE (Только для первого, самого охватного ролика)
+            // Загрузка ПЕРВОГО видео в Google Cloud для Gemini 3
             if (i === 0 && !googleFileResource) {
-              const fileSize = uint8Array.byteLength.toString();
-              console.info(`[GOOGLE] Starting upload. Size: ${fileSize} bytes`);
-
-              // Step 1: Start Resumable Session
+              console.info(`[GOOGLE] Uploading target video (${uint8Array.byteLength} bytes)`);
               const startRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
                   'X-Goog-Upload-Protocol': 'resumable',
                   'X-Goog-Upload-Command': 'start',
                   'X-Goog-Upload-Header-Content-Type': 'video/mp4',
-                  'X-Goog-Upload-Header-Content-Length': fileSize,
+                  'X-Goog-Upload-Header-Content-Length': uint8Array.byteLength.toString(),
                   'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ file: { display_name: `analysis_${adId}` } })
+                body: JSON.stringify({ file: { display_name: `spy_target_${adId}` } })
               });
 
               const uploadUrl = startRes.headers.get('x-goog-upload-url');
               if (uploadUrl) {
-                // Step 2: Upload Data
                 const finalRes = await fetch(uploadUrl, {
                   method: 'POST',
-                  headers: { 
-                    'X-Goog-Upload-Offset': '0', 
-                    'X-Goog-Upload-Command': 'upload, finalize',
-                    'Content-Length': fileSize
-                  },
+                  headers: { 'X-Goog-Upload-Offset': '0', 'X-Goog-Upload-Command': 'upload, finalize' },
                   body: uint8Array
                 });
-                
-                if (finalRes.ok) {
-                  googleFileResource = await finalRes.json();
-                  console.info(`[GOOGLE] Step 2 SUCCESS: ${googleFileResource.file.uri}`);
-                } else {
-                  console.error(`[GOOGLE] Step 2 FAILED: ${await finalRes.text()}`);
-                }
+                googleFileResource = await finalRes.json();
+                console.info(`[GOOGLE] Step 2 Success: ${googleFileResource.file.uri}`);
               }
             }
 
-            // ЗАГРУЗКА В SUPABASE (Для плеера в интерфейсе)
+            // Загрузка в Supabase Storage
             const fileName = `vid_${adId}.mp4`;
             await supabase.storage.from('ads_videos').upload(fileName, uint8Array, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
@@ -110,13 +97,13 @@ export async function POST(req: Request) {
         id: adId,
         thumbnail: videoSource?.video_preview_image_url || "",
         video: storageUrl,
-        title: ad.snapshot?.title || "Ad Creative",
+        title: ad.snapshot?.title || "Ad",
         body: ad.snapshot?.body?.text || ""
       });
     }
 
-    // 3. АНАЛИЗ (Gemini 1.5 Flash Latest)
-    let strategy = "Vision analysis failed.";
+    // 3. АНАЛИЗ С АВТО-ПОДБОРОМ МОДЕЛИ (Fallback Brute-force)
+    let strategy = "Vision analysis unavailable.";
     if (googleFileResource?.file?.name) {
       const gFileName = googleFileResource.file.name;
       
@@ -125,49 +112,66 @@ export async function POST(req: Request) {
         const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${gFileName}?key=${geminiKey}`);
         const checkData = await checkRes.json();
         
-        console.info(`[AI] Polling state: ${checkData.state} (Attempt ${attempt + 1})`);
+        console.info(`[POLLING] File State: ${checkData.state}`);
 
         if (checkData.state === 'ACTIVE') {
-          // Пауза 8 секунд для "прогрева" индексов видео
-          await new Promise(r => setTimeout(r, 8000));
-          console.info("[AI] Sending analysis request...");
+          await new Promise(r => setTimeout(r, 10000)); // "Прогрев" видео
+          console.info("[BRUTEFORCE] Starting model selection...");
 
-          const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { text: "Detailed UA Strategy Analysis. Break down: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. GAMEPLAY MECHANICS, 4. PSYCHOLOGICAL TRIGGERS. Output in English." },
-                  { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
-                ]
-              }],
-              safetySettings: [
-                { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-              ]
-            })
-          });
+          // Список моделей 2026 года для перебора
+          const modelsToTry = [
+            "gemini-3-flash-preview", // Самая новая Gemini 3 Flash
+            "gemini-3-flash",         // Gemini 3 Flash (стабильная)
+            "gemini-3-pro-preview",   // Умная Gemini 3
+            "gemini-2.0-flash-exp",   // Запасная Gemini 2
+            "gemini-1.5-flash"        // Старая добрая 1.5
+          ];
 
-          const gData = await geminiRes.json();
+          for (const modelName of modelsToTry) {
+            try {
+              console.info(`[BRUTEFORCE] Trying model: ${modelName}`);
+              const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: [{
+                    parts: [
+                      { text: "ACT AS A UA STRATEGIST. Analyze this video: 1. CORE CONCEPT, 2. VISUAL HOOK (0-3s), 3. MECHANICS, 4. PSYCHOLOGICAL TRIGGERS. Reply in English." },
+                      { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
+                    ]
+                  }],
+                  safetySettings: [
+                    { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+                    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+                    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+                    { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+                  ]
+                })
+              });
 
-          if (gData.candidates?.[0]?.content?.parts?.[0]?.text) {
-            strategy = gData.candidates[0].content.parts[0].text;
-            console.info("[AI SUCCESS] Analysis received.");
-            break;
-          } else {
-            console.error("[AI ERROR] Response empty. Details:", JSON.stringify(gData));
-            strategy = `Analysis blocked. Reason: ${gData.candidates?.[0]?.finishReason || "Unknown"}`;
-            break;
+              const gData = await geminiRes.json();
+
+              if (gData.error) {
+                console.warn(`[SKIP] Model ${modelName} returned error: ${gData.error.message}`);
+                continue; 
+              }
+
+              if (gData.candidates?.[0]?.content?.parts?.[0]?.text) {
+                strategy = gData.candidates[0].content.parts[0].text;
+                console.info(`[!!! SUCCESS !!!] Model ${modelName} generated strategy.`);
+                break; // Текст получен, выходим из цикла моделей
+              }
+            } catch (err) {
+              console.error(`[FATAL] Unexpected error on ${modelName}`);
+            }
           }
+          break; // Выходим из цикла поллинга
         }
       }
     }
 
-    // 4. СОХРАНЕНИЕ В БАЗУ
-    const brandName = data[0]?.snapshot?.page_name || "Unknown Brand";
+    // 4. СОХРАНЕНИЕ
+    const brandName = data[0]?.snapshot?.page_name || "Brand";
     await supabase.from('ads_library').insert([{
       page_id: pageId, 
       brand_name: brandName, 
@@ -175,11 +179,11 @@ export async function POST(req: Request) {
       creatives: processed
     }]);
 
-    console.info(`[DONE] Finished processing ${brandName}`);
+    console.info(`[FINISH] Processed ${brandName} successfully.`);
     return NextResponse.json({ brand: brandName, strategy, creatives: processed });
 
   } catch (e: any) {
-    console.error(`[CRITICAL ERROR] ${e.message}`);
+    console.error(`[CRITICAL] ${e.message}`);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
