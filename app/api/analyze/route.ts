@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
-// Vercel Pro позволяет нам держать соединение до 5 минут
 export const maxDuration = 300; 
 
 export async function POST(req: Request) {
@@ -14,7 +13,7 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. Сбор ТОП-10 креативов по показам через Apify
+    // 1. Сбор 10 креативов по показам
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`;
     const res = await fetch(apifyUrl, {
       method: 'POST',
@@ -29,12 +28,11 @@ export async function POST(req: Request) {
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify failed to fetch data.");
+    if (!Array.isArray(data)) throw new Error("Apify failed");
 
     const processed = [];
     let googleFileResource: any = null;
 
-    // Обработка медиа
     for (let i = 0; i < data.slice(0, 10).length; i++) {
       const ad = data[i];
       const adId = ad.ad_archive_id;
@@ -48,7 +46,7 @@ export async function POST(req: Request) {
           if (vFetch.ok) {
             const buffer = await vFetch.arrayBuffer();
 
-            // «Железный» Resumable Upload
+            // Загрузка в Google для анализа (только для первого видео)
             if (i === 0 && !googleFileResource) {
               const startRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
@@ -69,6 +67,7 @@ export async function POST(req: Request) {
                   body: Buffer.from(buffer)
                 });
                 googleFileResource = await finalRes.json();
+                console.info(`[IRON] SUCCESS: Video uploaded. Name: ${googleFileResource.name}`);
               }
             }
 
@@ -76,7 +75,7 @@ export async function POST(req: Request) {
             await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e: any) { console.error(`[MEDIA ERROR] ${adId}`); }
+        } catch (e: any) { console.error(`Media err: ${adId}`); }
       }
 
       processed.push({
@@ -88,29 +87,32 @@ export async function POST(req: Request) {
       });
     }
 
-    // 2. ГЛУБОКИЙ АНАЛИЗ ЧЕРЕЗ GEMINI 3 FLASH (TIER 1 POWER)
+    // 2. АНАЛИЗ (ИСПРАВЛЕННЫЙ ПУТЬ К ОБЪЕКТУ)
     let strategy = "Vision analysis unavailable.";
-    if (googleFileResource?.file?.name) {
-      const gFileName = googleFileResource.file.name;
+    // Исправлено: Проверяем googleFileResource.name напрямую
+    if (googleFileResource && googleFileResource.name) {
+      const gFileName = googleFileResource.name;
       
-      for (let attempt = 0; attempt < 15; attempt++) {
+      for (let attempt = 0; attempt < 20; attempt++) {
         await new Promise(r => setTimeout(r, 4000)); 
         const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${gFileName}?key=${geminiKey}`);
         const checkData = await checkRes.json();
         
-        if (checkData.state === 'ACTIVE') {
-          console.info("[ULTRA] Video is ACTIVE. Deep indexing (25s)...");
-          await new Promise(r => setTimeout(r, 25000)); 
+        console.info(`[IRON] Polling status: ${checkData.state}`);
 
-          // Прямой запрос к лучшей модели без циклов перебора
-          const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent?key=${geminiKey}`, {
+        if (checkData.state === 'ACTIVE') {
+          console.info("[IRON] Video ACTIVE. Analyzing...");
+          await new Promise(r => setTimeout(r, 15000)); // Небольшая пауза для завершения индексации
+
+          // На Tier 1 используем Gemini 1.5 Pro — она самая точная для видео
+          const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${geminiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{
                 parts: [
-                  { text: "You are a Senior UA Creative Strategist. Analyze this winning video ad and provide a highly detailed teardown in English: 1. CORE CONCEPT, 2. VISUAL HOOK (first 3s), 3. GAMEPLAY MECHANICS (describe every step), 4. PSYCHOLOGY & TRIGGERS. Be specific about visual elements." },
-                  { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
+                  { text: "Analyze this video for a UA strategy: 1. CORE CONCEPT, 2. VISUAL HOOK, 3. MECHANICS, 4. PSYCHOLOGY. English only." },
+                  { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.uri } }
                 ]
               }],
               safetySettings: [
@@ -123,23 +125,27 @@ export async function POST(req: Request) {
           });
 
           const gData = await geminiRes.json();
-          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "AI failed to generate analysis.";
-          console.info("[ULTRA SUCCESS] Analysis complete using Gemini 3 Flash.");
+          if (gData.candidates?.[0]?.content?.parts?.[0]?.text) {
+            strategy = gData.candidates[0].content.parts[0].text;
+            console.info("[IRON] Analysis SUCCESS");
+            break;
+          } else {
+            strategy = "AI failed to produce text: " + (gData.error?.message || "Unknown error");
+          }
+          break;
+        } else if (checkData.state === 'FAILED') {
+          strategy = "Google video processing failed.";
           break;
         }
       }
     }
 
-    // 3. Сохранение в базу
-    const brandName = data[0]?.snapshot?.page_name || "Brand";
     await supabase.from('ads_library').insert([{
-      page_id: pageId, 
-      brand_name: brandName, 
-      strategy_analysis: strategy, 
-      creatives: processed
+      page_id: pageId, brand_name: data[0]?.snapshot?.page_name || "Brand", 
+      strategy_analysis: strategy, creatives: processed
     }]);
 
-    return NextResponse.json({ brand: brandName, strategy, creatives: processed });
+    return NextResponse.json({ brand: data[0]?.snapshot?.page_name, strategy, creatives: processed });
 
   } catch (e: any) {
     console.error(`[CRITICAL] ${e.message}`);
