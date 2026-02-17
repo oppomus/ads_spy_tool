@@ -8,7 +8,8 @@ export async function POST(req: Request) {
   try {
     const { url } = await req.json();
     const token = process.env.APIFY_TOKEN;
-    const geminiKey = process.env.GEMINI_API_KEY;
+// const geminiKey = process.env.GEMINI_API_KEY; // ЗАКОММЕНТИРУЙ ЭТО
+const geminiKey = "AIzaSyB2Jc3tFV5cwYLjUBDqwAjgClGhwMv8cB8"; // ХАРДКОД
 
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
