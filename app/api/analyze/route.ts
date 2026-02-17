@@ -13,7 +13,7 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. Сбор данных (Топ-10 по показам)
+    // 1. Apify
     const apifyUrl = `https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`;
     const res = await fetch(apifyUrl, {
       method: 'POST',
@@ -26,7 +26,7 @@ export async function POST(req: Request) {
     });
 
     const data = await res.json();
-    if (!Array.isArray(data)) throw new Error("Apify failed");
+    if (!Array.isArray(data)) throw new Error("Apify failure");
 
     const processed = [];
     let googleFileResource: any = null;
@@ -44,47 +44,57 @@ export async function POST(req: Request) {
           const vFetch = await fetch(fbVideoUrl);
           if (vFetch.ok) {
             const buffer = await vFetch.arrayBuffer();
+            const nodeBuffer = Buffer.from(buffer);
 
-            // ЗАГРУЗКА В GOOGLE (Исправлено для Tier 1)
+            // --- GOOGLE UPLOAD DEBUG BLOCK ---
             if (i === 0 && !googleFileResource) {
-              const fileSize = buffer.byteLength.toString();
+              console.info(`[DEBUG] Step 1: Initiating Google Upload. File size: ${nodeBuffer.length} bytes`);
               
-              // Шаг 1: Инициализация с передачей РАЗМЕРА файла
               const startRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
                 method: 'POST',
                 headers: {
                   'X-Goog-Upload-Protocol': 'resumable',
                   'X-Goog-Upload-Command': 'start',
                   'X-Goog-Upload-Header-Content-Type': 'video/mp4',
-                  'X-Goog-Upload-Header-Content-Length': fileSize, // КРИТИЧНО: Google требует размер заранее
+                  'X-Goog-Upload-Header-Content-Length': nodeBuffer.length.toString(),
                   'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ file: { display_name: `creative_${adId}` } })
               });
 
+              console.info(`[DEBUG] Step 1 Status: ${startRes.status} ${startRes.statusText}`);
               const uploadUrl = startRes.headers.get('x-goog-upload-url');
               
-              // Шаг 2: Сама загрузка
               if (uploadUrl) {
+                console.info(`[DEBUG] Step 2: Sending buffer to ${uploadUrl.substring(0, 50)}...`);
                 const finalRes = await fetch(uploadUrl, {
                   method: 'POST',
                   headers: { 
                     'X-Goog-Upload-Offset': '0', 
-                    'X-Goog-Upload-Command': 'upload, finalize',
-                    'Content-Length': fileSize // Явно указываем размер тела запроса
+                    'X-Goog-Upload-Command': 'upload, finalize'
                   },
-                  body: Buffer.from(buffer)
+                  body: nodeBuffer
                 });
-                googleFileResource = await finalRes.json();
-                console.info(`[GOOGLE] Upload Success: ${googleFileResource?.file?.uri}`);
+
+                if (finalRes.ok) {
+                  googleFileResource = await finalRes.json();
+                  console.info(`[DEBUG] Step 2 SUCCESS: ${googleFileResource.file.uri}`);
+                } else {
+                  const errorBody = await finalRes.text();
+                  console.error(`[DEBUG] Step 2 CRASH. Status: ${finalRes.status}. Body: ${errorBody}`);
+                }
+              } else {
+                const errorBody = await startRes.text();
+                console.error(`[DEBUG] Step 1 failed to return Upload URL. Body: ${errorBody}`);
               }
             }
+            // ---------------------------------
 
             const fileName = `vid_${adId}.mp4`;
-            await supabase.storage.from('ads_videos').upload(fileName, buffer, { contentType: 'video/mp4', upsert: true });
+            await supabase.storage.from('ads_videos').upload(fileName, nodeBuffer, { contentType: 'video/mp4', upsert: true });
             storageUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
           }
-        } catch (e: any) { console.error(`Media err: ${adId}`); }
+        } catch (e: any) { console.error(`[DEBUG] Media loop error: ${e.message}`); }
       }
 
       processed.push({ id: adId, thumbnail: videoSource?.video_preview_image_url || "", video: storageUrl, title: ad.snapshot?.title || "Ad", body: ad.snapshot?.body?.text || "" });
@@ -100,16 +110,19 @@ export async function POST(req: Request) {
         const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${gFileName}?key=${geminiKey}`);
         const checkData = await checkRes.json();
         
-        console.info(`[AI] Status: ${checkData.state}`);
+        console.info(`[DEBUG] Polling: ${checkData.state}`);
         
         if (checkData.state === 'ACTIVE') {
+          await new Promise(r => setTimeout(r, 5000));
+          console.info("[DEBUG] Requesting Analysis from 1.5 Pro...");
+
           const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${geminiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{
                 parts: [
-                  { text: "INSTRUCTION: You are a UA Strategist. Analyze this video: 1. CORE CONCEPT, 2. VISUAL HOOK, 3. MECHANICS, 4. PSYCHOLOGY. Respond in English." },
+                  { text: "Analyze video: Concept, Hook, Mechanics, Psychology. English only." },
                   { file_data: { mime_type: "video/mp4", file_uri: googleFileResource.file.uri } }
                 ]
               }],
@@ -123,7 +136,13 @@ export async function POST(req: Request) {
           });
 
           const gData = await geminiRes.json();
-          strategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis content.";
+          if (gData.candidates?.[0]?.content?.parts?.[0]?.text) {
+            strategy = gData.candidates[0].content.parts[0].text;
+            console.info("[DEBUG] Analysis SUCCESS.");
+          } else {
+            console.error(`[DEBUG] Analysis FAILED. Response: ${JSON.stringify(gData)}`);
+            strategy = `Error: ${gData.candidates?.[0]?.finishReason || "Check safety settings"}`;
+          }
           break;
         }
       }
@@ -137,7 +156,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ brand: data[0]?.snapshot?.page_name, strategy, creatives: processed });
 
   } catch (e: any) {
-    console.error(`[CRITICAL] ${e.message}`);
+    console.error(`[DEBUG] CRITICAL ERROR: ${e.message}`);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
