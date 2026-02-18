@@ -13,16 +13,14 @@ export async function POST(req: Request) {
   try {
     const { url } = await req.json();
     const token = process.env.APIFY_TOKEN;
-// ТЕПЕРЬ БЕРЕМ ИЗ VERCEL, А НЕ ИЗ ТЕКСТА
+    
+    // ТЕПЕРЬ БЕРЕМ ИЗ VERCEL, А НЕ ИЗ ТЕКСТА
     const geminiKey = process.env.GEMINI_API_KEY; 
 
     if (!geminiKey) {
        console.error(">>> [CRITICAL] GEMINI_API_KEY is missing in Vercel Env Vars!");
        throw new Error("API Key configuration error");
     }
-    
-    const idMatch = url.match(/\d{10,}/);
-    const pageId = idMatch ? idMatch[0] : url;
     
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
