@@ -1,3 +1,27 @@
+// Добавь в начало файла: npm install react-markdown
+import ReactMarkdown from 'react-markdown';
+
+// Внутри компонента, где ты выводишь результат (strategy_analysis):
+<div className="mt-8 bg-slate-900/50 rounded-2xl border border-slate-800 p-8">
+  <div className="flex items-center gap-3 mb-6">
+    <div className="w-2 h-8 bg-blue-500 rounded-full" />
+    <h2 className="text-2xl font-bold text-white">Strategic Concept Analysis</h2>
+  </div>
+  
+  <div className="prose prose-invert max-w-none text-slate-300">
+    {/* Мы используем ReactMarkdown для красивого рендеринга заголовков и списков */}
+    <ReactMarkdown 
+      components={{
+        h3: ({node, ...props}) => <h3 className="text-xl font-semibold text-blue-400 mt-8 mb-4 border-b border-slate-800 pb-2" {...props} />,
+        strong: ({node, ...props}) => <span className="text-white font-bold" {...props} />,
+        li: ({node, ...props}) => <li className="mb-2 list-disc ml-4" {...props} />,
+      }}
+    >
+      {analysis.strategy}
+    </ReactMarkdown>
+  </div>
+</div>
+
 'use client';
 import React, { useState } from 'react';
 import Link from 'next/link';
