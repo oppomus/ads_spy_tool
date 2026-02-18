@@ -12,7 +12,6 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. Скрапинг ТОП-10
     const apifyRes = await fetch(`https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -23,7 +22,6 @@ export async function POST(req: Request) {
     const processedCreatives = [];
     const googleFileUris = [];
 
-    // 2. Загрузка всех видео
     for (const ad of data.slice(0, 10)) {
       const adId = ad.ad_archive_id;
       const videoUrl = ad.snapshot?.videos?.[0]?.video_hd_url || ad.snapshot?.videos?.[0]?.video_sd_url;
@@ -53,25 +51,23 @@ export async function POST(req: Request) {
           id: adId, 
           video: supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl, 
           thumbnail: ad.snapshot?.videos?.[0]?.video_preview_image_url || "",
-          concept: 'All' // Фолбек
+          concept: 'Gameplay' // Заглушка, чтобы фильтр не ломался
         });
       } catch (e) { console.error(`Err: ${adId}`); }
     }
 
-    // 3. Анализ в Gemini 3 Flash с тегированием
-    let finalStrategy = "Analysis failed.";
-    if (googleFileUris.length > 0) {
-      await new Promise(r => setTimeout(r, 15000)); // Ждем индексации
+    if (googleFileUris.length > 0) await new Promise(r => setTimeout(r, 15000));
 
+    let finalStrategy = "Strategic Analysis Unavailable.";
+    if (googleFileUris.length > 0) {
       const promptParts: any[] = [
         { text: `INSTRUCTION: You are a Senior UA Lead. Analyze these 10 videos.
-          1. Group them into 2-4 Concepts: Misleading, Gameplay, UGC, or Cinematic.
-          2. Provide a Strategic Report in Markdown.
-          3. IMPORTANT: At the very end of your response, provide a JSON mapping exactly like this:
-          TAGS_START
-          [{"id": "video_id", "concept": "ConceptName"}]
-          TAGS_END
-          Use the actual Ad IDs from the file names (e.g. id_4123456). ConceptName must be one of: Misleading, Gameplay, UGC, Cinematic.` }
+          1. Provide a detailed Strategic Report in Markdown (Concepts, Hooks, Psychology).
+          2. Classify each video into ONE of these: Misleading, Gameplay, UGC, Cinematic.
+          3. At the end of your response, list EXACTLY this format for tagging:
+          [TAGS]
+          ID: [video_id] -> CONCEPT: [ConceptName]
+          [TAGS_END]` }
       ];
       googleFileUris.forEach(f => promptParts.push({ file_data: { mime_type: "video/mp4", file_uri: f.uri } }));
 
@@ -82,27 +78,22 @@ export async function POST(req: Request) {
       });
 
       const gData = await geminiRes.json();
-      const rawText = gData.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const rawText = gData.candidates?.[0]?.content?.parts?.[0]?.text || "No text returned.";
+      finalStrategy = rawText; // ТЕКСТ ТЕПЕРЬ ВСЕГДА СОХРАНЯЕТСЯ
 
-      // ПАРСИНГ ТЕГОВ
-      const jsonMatch = rawText.match(/TAGS_START([\s\S]*?)TAGS_END/);
-      if (jsonMatch) {
-        try {
-          const tags = JSON.parse(jsonMatch[1].trim());
-          processedCreatives.forEach(ad => {
-            const tag = tags.find((t: any) => t.id.includes(ad.id));
-            if (tag) ad.concept = tag.concept;
-          });
-          finalStrategy = rawText.replace(/TAGS_START[\s\S]*?TAGS_END/, "").trim();
-        } catch (e) { finalStrategy = rawText; }
-      } else {
-        finalStrategy = rawText;
-      }
+      // Мягкий парсинг тегов без удаления текста
+      processedCreatives.forEach(ad => {
+        if (rawText.includes(ad.id)) {
+          if (rawText.toLowerCase().includes('misleading')) ad.concept = 'Misleading';
+          else if (rawText.toLowerCase().includes('ugc')) ad.concept = 'UGC';
+          else if (rawText.toLowerCase().includes('cinematic')) ad.concept = 'Cinematic';
+          else ad.concept = 'Gameplay';
+        }
+      });
     }
 
     const brandName = data[0]?.snapshot?.page_name || "Brand";
     await supabase.from('ads_library').insert([{ page_id: pageId, brand_name: brandName, strategy_analysis: finalStrategy, creatives: processedCreatives }]);
-
     return NextResponse.json({ brand: brandName, strategy: finalStrategy, creatives: processedCreatives });
 
   } catch (e: any) { return NextResponse.json({ error: e.message }, { status: 500 }); }
