@@ -9,6 +9,8 @@ export default function DetailedReport() {
   const { id } = useParams();
   const [report, setReport] = useState<any>(null);
   const [activeFilter, setActiveFilter] = useState('All');
+  const [scriptLoading, setScriptLoading] = useState(false);
+  const [generatedScript, setGeneratedScript] = useState('');
 
   useEffect(() => {
     fetch(`/api/archive?id=${id}`)
@@ -16,12 +18,27 @@ export default function DetailedReport() {
       .then(data => setReport(data));
   }, [id]);
 
-  const handleGenerateScript = () => {
-    alert("Magic is coming! Next step: coding the Script Generator API.");
+  const handleGenerateScript = async (brandName: string, strategyText: string) => {
+    setScriptLoading(true);
+    setGeneratedScript('');
+    try {
+      const res = await fetch('/api/generate-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: brandName, strategy: strategyText }),
+      });
+      const data = await res.json();
+      if (data.script) {
+        setGeneratedScript(data.script);
+      }
+    } catch (e) {
+      alert("Script generation failed.");
+    }
+    setScriptLoading(false);
   };
 
   if (!report) return (
-    <div className="min-h-screen bg-[#020617] flex items-center justify-center text-blue-500 font-black italic uppercase tracking-[0.5em] animate-pulse">
+    <div className="min-h-screen bg-[#020617] flex items-center justify-center text-blue-500 font-black italic uppercase tracking-[0.5em] animate-pulse font-sans">
       Decrypting Intel...
     </div>
   );
@@ -29,7 +46,7 @@ export default function DetailedReport() {
   const concepts = ['All', 'Misleading', 'Gameplay', 'UGC', 'Cinematic'];
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-100 p-8 font-sans">
+    <div className="min-h-screen bg-[#020617] text-slate-100 p-8 font-sans pb-40">
       {/* HEADER */}
       <div className="max-w-7xl mx-auto flex justify-between items-center mb-16 border-b border-slate-800 pb-8">
         <Link href="/archive" className="group flex items-center gap-3 text-cyan-400 text-xs font-black uppercase tracking-widest transition-all">
@@ -45,7 +62,7 @@ export default function DetailedReport() {
       </div>
 
       <div className="max-w-7xl mx-auto">
-        <h2 className="text-8xl font-black mb-6 uppercase italic tracking-tighter text-white drop-shadow-2xl">
+        <h2 className="text-8xl font-black mb-6 uppercase italic tracking-tighter text-white drop-shadow-2xl leading-none">
           {report.brand_name}
         </h2>
 
@@ -67,8 +84,6 @@ export default function DetailedReport() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
-          
-          {/* AI ANALYSIS BOX WITH MARKDOWN */}
           <div className="lg:col-span-7 space-y-8">
             <div className="bg-slate-900/40 border border-slate-800 p-12 rounded-[4rem] backdrop-blur-xl shadow-inner border-t-blue-500/20">
               <div className="prose prose-invert max-w-none">
@@ -84,37 +99,29 @@ export default function DetailedReport() {
                 </ReactMarkdown>
               </div>
 
-              {/* ACTION BUTTON */}
               <button 
-                onClick={handleGenerateScript}
-                className="mt-12 w-full bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 hover:scale-[1.02] text-white font-black uppercase text-xs py-6 rounded-[2rem] transition-all active:scale-95 shadow-2xl shadow-blue-900/40 flex items-center justify-center gap-4 group"
+                onClick={() => handleGenerateScript(report.brand_name, report.strategy_analysis)}
+                disabled={scriptLoading}
+                className="mt-12 w-full bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 hover:scale-[1.02] text-white font-black uppercase text-xs py-6 rounded-[2rem] transition-all active:scale-95 shadow-2xl shadow-blue-900/40 flex items-center justify-center gap-4 group disabled:opacity-50"
               >
-                <span className="text-xl group-hover:rotate-12 transition-transform">🪄</span>
-                <span>Generate High-Convert Ad Script</span>
+                {scriptLoading ? '🪄 Writing Script...' : '🪄 Generate High-Convert Ad Script'}
               </button>
             </div>
           </div>
 
-          {/* VIDEO GRID (Filtered) */}
           <div className="lg:col-span-5 grid grid-cols-2 gap-4 h-fit sticky top-8">
             {report.creatives
               ?.filter((ad: any) => activeFilter === 'All' || ad.concept === activeFilter)
               .map((ad: any) => (
               <div key={ad.id} className="aspect-[9/16] bg-black rounded-[2.5rem] overflow-hidden border border-slate-800 shadow-2xl relative group">
                 {ad.video ? (
-                  <video 
-                    src={ad.video} 
-                    poster={ad.thumbnail}
-                    controls 
-                    className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-110" 
-                  />
+                  <video src={ad.video} poster={ad.thumbnail} controls className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-110" />
                 ) : (
                   <div className="flex flex-col items-center justify-center h-full bg-slate-900/50 p-6 text-center">
                     <img src={ad.thumbnail} className="opacity-10 mb-4 w-20 grayscale" alt="N/A" />
                     <span className="text-[10px] font-black uppercase opacity-20 tracking-widest leading-tight">Asset Archived</span>
                   </div>
                 )}
-                {/* Категория на видео */}
                 {ad.concept && ad.concept !== 'All' && (
                   <div className="absolute top-4 left-4 bg-blue-600/90 text-[8px] font-black uppercase px-3 py-1 rounded-full backdrop-blur-md">
                     {ad.concept}
@@ -123,8 +130,23 @@ export default function DetailedReport() {
               </div>
             ))}
           </div>
-
         </div>
+
+        {/* SCRIPT DISPLAY BLOCK */}
+        {generatedScript && (
+          <div className="mt-12 bg-blue-900/20 border-2 border-blue-500/30 p-10 rounded-[3.5rem] animate-in zoom-in-95 duration-500">
+            <div className="flex items-center gap-4 mb-6">
+              <span className="text-3xl">📝</span>
+              <h2 className="text-3xl font-black uppercase italic text-white tracking-tighter">Generated Ad Script</h2>
+            </div>
+            <div className="prose prose-invert max-w-none prose-table:border prose-table:border-slate-700 prose-td:p-4 prose-th:bg-slate-800">
+              <ReactMarkdown>{generatedScript}</ReactMarkdown>
+            </div>
+            <button onClick={() => setGeneratedScript('')} className="mt-8 text-slate-500 text-[10px] font-black uppercase tracking-widest hover:text-white transition-colors">
+              [ Close Script ]
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
