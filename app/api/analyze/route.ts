@@ -1,19 +1,25 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
+const supabase = createClient(
+  process.env.SUPABASE_URL || '', 
+  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+);
+
 export const maxDuration = 300; 
 
 export async function POST(req: Request) {
-  console.log(">>> [START] New Analysis Request Received");
+  console.log(">>> [STATION START] Incoming request...");
   try {
     const { url } = await req.json();
     const token = process.env.APIFY_TOKEN;
-    const geminiKey = process.env.GEMINI_API_KEY;
+    const geminiKey = "AIzaSyB2Jc3tFV5cwYLjUBDqwAjgClGhwMv8cB8"; 
+    
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    console.log(`>>> [STEP 1] Scrapping Ads for PageID: ${pageId}`);
+    console.log(`>>> [STEP 1] Scraping Page ID: ${pageId}`);
+    
     const apifyRes = await fetch(`https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -25,139 +31,185 @@ export async function POST(req: Request) {
     });
 
     const data = await apifyRes.json();
-    console.log(`>>> [DATA] Apify returned ${data?.length || 0} ads`);
+    if (!Array.isArray(data)) {
+        console.error(">>> [APIFY FAIL] Data is not an array:", data);
+        throw new Error("Apify response invalid");
+    }
+    console.log(`>>> [STEP 2] Found ${data.length} ads. Starting asset transfer...`);
 
     const processedCreatives = [];
-    const googleFiles = []; // Храним полные объекты ответов Google
+    const googleFiles = [];
 
-    // 2. ЦИКЛ ЗАГРУЗКИ
+    // --- ЦИКЛ ОБРАБОТКИ 10 ВИДЕО ---
     for (const ad of data.slice(0, 10)) {
       const adId = ad.ad_archive_id;
       const videoUrl = ad.snapshot?.videos?.[0]?.video_hd_url || ad.snapshot?.videos?.[0]?.video_sd_url;
       
       if (!videoUrl) {
-        console.log(`>>> [SKIP] No video for AdID: ${adId}`);
+        console.log(`>>> [SKIP] No video link for Ad ID ${adId}`);
         continue;
       }
 
-      console.log(`>>> [UPLOAD] Starting AdID: ${adId}`);
+      console.log(`>>> [DOWNLOAD] Fetching video buffer for ${adId}...`);
       try {
         const vFetch = await fetch(videoUrl);
         const buffer = await vFetch.arrayBuffer();
         const uint8 = new Uint8Array(buffer);
+        const fileSize = uint8.byteLength.toString();
 
-        // Загрузка в Google
-        console.log(`>>> [GOOGLE] Uploading ${adId} (${uint8.byteLength} bytes)...`);
+        // 1. Google Upload Handshake
+        console.log(`>>> [GOOGLE] Starting Handshake for ${adId}...`);
         const gStart = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
           method: 'POST',
           headers: {
             'X-Goog-Upload-Protocol': 'resumable',
             'X-Goog-Upload-Command': 'start',
             'X-Goog-Upload-Header-Content-Type': 'video/mp4',
-            'X-Goog-Upload-Header-Content-Length': uint8.byteLength.toString(),
+            'X-Goog-Upload-Header-Content-Length': fileSize,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ file: { display_name: `creative_${adId}` } })
+          body: JSON.stringify({ file: { display_name: `ads_${adId}` } })
         });
 
-        const uploadUrl = gStart.headers.get('x-goog-upload-url');
-        if (!uploadUrl) throw new Error(`Failed to get Google Upload URL for ${adId}`);
+        if (!gStart.ok) {
+          const errorMsg = await gStart.text();
+          console.error(`>>> [GOOGLE HANDSHAKE ERROR] Status: ${gStart.status} | Body: ${errorMsg}`);
+          throw new Error(`Google handshake failed: ${gStart.status}`);
+        }
 
+        const uploadUrl = gStart.headers.get('x-goog-upload-url');
+        if (!uploadUrl) {
+          console.error(`>>> [GOOGLE ERROR] No upload URL in headers for ${adId}`);
+          throw new Error("Missing upload URL");
+        }
+
+        // 2. Google Actual Upload
+        console.log(`>>> [GOOGLE] Pushing bytes for ${adId}...`);
         const gFinal = await fetch(uploadUrl, {
           method: 'POST',
-          headers: { 'X-Goog-Upload-Offset': '0', 'X-Goog-Upload-Command': 'upload, finalize' },
+          headers: { 
+            'X-Goog-Upload-Offset': '0', 
+            'X-Goog-Upload-Command': 'upload, finalize' 
+          },
           body: uint8
         });
 
         const gRes = await gFinal.json();
-        console.log(`>>> [GOOGLE DONE] AdID: ${adId} -> Google Name: ${gRes.file.name}`);
+        console.log(`>>> [GOOGLE SUCCESS] Ad ${adId} registered as: ${gRes.file.name}`);
         googleFiles.push({ uri: gRes.file.uri, name: gRes.file.name, id: adId });
 
-        // Сохранение в Supabase
+        // 3. Supabase Upload
+        console.log(`>>> [SUPABASE] Uploading video for ${adId}...`);
         const fileName = `vid_${adId}.mp4`;
-        await supabase.storage.from('ads_videos').upload(fileName, uint8, { contentType: 'video/mp4', upsert: true });
+        const { error: storageError } = await supabase.storage
+          .from('ads_videos')
+          .upload(fileName, uint8, { contentType: 'video/mp4', upsert: true });
+
+        if (storageError) console.error(`>>> [SUPABASE ERROR] ${storageError.message}`);
+
+        const publicUrl = supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl;
         
         processedCreatives.push({ 
           id: adId, 
-          video: supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl, 
+          video: publicUrl, 
           thumbnail: ad.snapshot?.videos?.[0]?.video_preview_image_url || "",
           concept: 'All'
         });
-      } catch (e: any) {
-        console.error(`>>> [ERROR] Failed to process ${adId}: ${e.message}`);
+
+      } catch (err: any) {
+        console.error(`>>> [FAILED CREATIVE ${adId}] ${err.message}`);
       }
     }
 
-    // 3. ПОЛЛИНГ (ПРОВЕРКА ГОТОВНОСТИ)
-    console.log(">>> [POLLING] Waiting for Google to index videos...");
+    // --- ЦИКЛ ПРОВЕРКИ ГОТОВНОСТИ (ВОССТАНОВЛЕН) ---
+    console.log(`>>> [POLLING] Checking status of ${googleFiles.length} files...`);
     for (const file of googleFiles) {
-      let ready = false;
+      let active = false;
       let attempts = 0;
-      while (!ready && attempts < 10) {
-        const check = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}?key=${geminiKey}`);
-        const cData = await check.json();
-        console.log(`>>> [STATUS] File ${file.id}: ${cData.state}`);
-        if (cData.state === 'ACTIVE') {
-          ready = true;
+      const maxAttempts = 12; // 1 минута на файл максимум
+
+      while (!active && attempts < maxAttempts) {
+        console.log(`>>> [POLLING] File ${file.id} attempt ${attempts + 1}...`);
+        const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}?key=${geminiKey}`);
+        const status = await checkRes.json();
+        
+        if (status.state === 'ACTIVE') {
+          console.log(`>>> [READY] File ${file.id} is ACTIVE`);
+          active = true;
         } else {
+          console.log(`>>> [WAIT] File ${file.id} is ${status.state}. Sleeping 5s...`);
           attempts++;
           await new Promise(r => setTimeout(r, 5000));
         }
       }
     }
 
-    // 4. АНАЛИЗ (Модель 2.0 Flash - самая быстрая и стабильная для видео)
-    console.log(`>>> [AI] Calling Gemini 2.0 Flash with ${googleFiles.length} videos...`);
-    let finalStrategy = "Analysis failed.";
-    
+    // --- АНАЛИЗ GEMINI 2.0 / 3 ---
+    console.log(">>> [AI] Sending files to model for strategy analysis...");
+    let finalStrategy = "Strategy analysis was not possible.";
+
     if (googleFiles.length > 0) {
       const promptParts = [
-        { text: "Analyze these video ads. Group into Concepts: Misleading, Gameplay, UGC, Cinematic. Use professional Markdown." },
+        { text: "Analyze these video ads. Group them into Concepts: Misleading, Gameplay, UGC, Cinematic. For each concept describe The Hook, Value Prop, and Psychology. Mention video IDs. Use Markdown." },
         ...googleFiles.map(f => ({ file_data: { mime_type: "video/mp4", file_uri: f.uri } }))
       ];
 
       const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           contents: [{ parts: promptParts }],
-          safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }]
+          safetySettings: [
+            { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+            { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+          ]
         })
       });
 
       const gData = await geminiRes.json();
       
       if (gData.error) {
-        console.error(">>> [AI ERROR]", JSON.stringify(gData.error));
-        finalStrategy = `AI Error: ${gData.error.message}`;
+        console.error(">>> [AI CRITICAL ERROR]", JSON.stringify(gData.error));
+        finalStrategy = `Error from AI: ${gData.error.message}`;
       } else {
-        finalStrategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "No analysis text returned.";
-        console.log(">>> [AI SUCCESS] Strategy generated.");
+        finalStrategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "No strategy generated.";
+        console.log(">>> [AI SUCCESS] Strategy text received.");
       }
 
-      // Примитивное тегирование
+      // Тегирование
       processedCreatives.forEach(ad => {
-        const lowText = finalStrategy.toLowerCase();
-        if (lowText.includes('misleading')) ad.concept = 'Misleading';
-        else if (lowText.includes('ugc')) ad.concept = 'UGC';
+        const stratLower = finalStrategy.toLowerCase();
+        if (stratLower.includes('misleading')) ad.concept = 'Misleading';
+        else if (stratLower.includes('ugc')) ad.concept = 'UGC';
+        else if (stratLower.includes('cinematic')) ad.concept = 'Cinematic';
         else ad.concept = 'Gameplay';
       });
     }
 
     const brandName = data[0]?.snapshot?.page_name || "Brand";
-    console.log(`>>> [SAVE] Saving to DB: ${brandName}`);
-    await supabase.from('ads_library').insert([{ 
+    
+    // --- СОХРАНЕНИЕ ---
+    console.log(`>>> [DB] Saving report for ${brandName}...`);
+    const { error: dbError } = await supabase.from('ads_library').insert([{ 
       page_id: pageId, 
       brand_name: brandName, 
       strategy_analysis: finalStrategy, 
       creatives: processedCreatives 
     }]);
 
-    console.log(">>> [COMPLETE] Success!");
-    return NextResponse.json({ brand: brandName, strategy: finalStrategy, creatives: processedCreatives });
-    
+    if (dbError) console.error(`>>> [DB ERROR] ${dbError.message}`);
+
+    console.log(">>> [ALL DONE] Returning results to client.");
+    return NextResponse.json({ 
+      brand: brandName, 
+      strategy: finalStrategy, 
+      creatives: processedCreatives 
+    });
+
   } catch (e: any) { 
-    console.error(`>>> [CRITICAL ERROR] ${e.message}`);
+    console.error(`>>> [GLOBAL CRITICAL FAIL] ${e.message}`);
     return NextResponse.json({ error: e.message }, { status: 500 }); 
   }
 }
