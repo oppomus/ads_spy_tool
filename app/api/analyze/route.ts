@@ -15,7 +15,7 @@ export async function POST(req: Request) {
     const token = process.env.APIFY_TOKEN;
     
     // ТЕПЕРЬ БЕРЕМ ИЗ VERCEL, А НЕ ИЗ ТЕКСТА
-    const geminiKey = process.env.NEW_TOTAL_SECRET_KEY; 
+    const geminiKey = process.env.NEXT_PUBLIC_NEW_TOTAL_SECRET_KEY; 
 
     if (!geminiKey) {
        // ИСПРАВЛЕНО: Теперь лог пишет правду про имя переменной
