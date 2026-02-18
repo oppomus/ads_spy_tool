@@ -1,92 +1,112 @@
-'use client';
+import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-import React, { useState } from 'react';
-import Link from 'next/link';
-import ReactMarkdown from 'react-markdown';
+const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_SERVICE_ROLE_KEY || '');
+export const maxDuration = 300; 
 
-export default function VibeSpyMain() {
-  const [input, setInput] = useState('');
-  const [results, setResults] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [activeFilter, setActiveFilter] = useState('All');
-  const [scriptLoading, setScriptLoading] = useState(false);
-  const [generatedScript, setGeneratedScript] = useState('');
+export async function POST(req: Request) {
+  try {
+    const { url } = await req.json();
+    const token = process.env.APIFY_TOKEN;
+    const geminiKey = "AIzaSyB2Jc3tFV5cwYLjUBDqwAjgClGhwMv8cB8"; 
+    const idMatch = url.match(/\d{10,}/);
+    const pageId = idMatch ? idMatch[0] : url;
 
-  const handleAnalyze = async () => {
-    if (!input) return alert("Enter Page ID");
-    setLoading(true);
-    try {
-      const res = await fetch('/api/analyze', { method: 'POST', body: JSON.stringify({ url: input }) });
-      const data = await res.json();
-      if (res.ok) setResults([data, ...results]);
-    } catch (e) { alert("Error occurred. Check console."); }
-    setLoading(false);
-  };
+    // 1. Скрапинг через Apify
+    const apifyRes = await fetch(`https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        "urls": [{ "url": `https://www.facebook.com/ads/library/?view_all_page_id=${pageId}&active_status=active&ad_type=all&country=ALL&sort_data[direction]=desc&sort_data[mode]=total_impressions` }], 
+        "count": 10, 
+        "scrapeAdDetails": true 
+      })
+    });
+    const data = await apifyRes.json();
+    
+    const processedCreatives = [];
+    const googleFileUris = [];
 
-  const handleGenerateScript = async (brand: string, strategy: string) => {
-    setScriptLoading(true);
-    try {
-      const res = await fetch('/api/generate-script', { method: 'POST', body: JSON.stringify({ brand, strategy }) });
-      const data = await res.json();
-      setGeneratedScript(data.script);
-    } catch (e) { alert("Script failed."); }
-    setScriptLoading(false);
-  };
+    // 2. Загрузка видео
+    for (const ad of data.slice(0, 10)) {
+      const adId = ad.ad_archive_id;
+      const videoUrl = ad.snapshot?.videos?.[0]?.video_hd_url || ad.snapshot?.videos?.[0]?.video_sd_url;
+      if (!videoUrl) continue;
 
-  return (
-    <div className="min-h-screen bg-[#020617] text-white p-8 font-sans">
-      <div className="max-w-7xl mx-auto flex justify-between mb-16 border-b border-slate-800 pb-8">
-        <h1 className="text-4xl font-black italic text-blue-500 uppercase">Spy Pro 2.0</h1>
-        <div className="flex gap-4">
-          <input value={input} onChange={e => setInput(e.target.value)} placeholder="Page ID..." className="bg-slate-900 border border-slate-800 px-6 py-3 rounded-2xl w-80 outline-none" />
-          <button onClick={handleAnalyze} disabled={loading} className="bg-blue-600 px-10 py-3 rounded-2xl font-black uppercase text-xs">
-            {loading ? 'Crunching...' : 'Spy Now'}
-          </button>
-        </div>
-      </div>
+      try {
+        const vFetch = await fetch(videoUrl);
+        const buffer = await vFetch.arrayBuffer();
+        const uint8 = new Uint8Array(buffer);
 
-      <div className="max-w-7xl mx-auto space-y-24">
-        {results.map((res, i) => (
-          <div key={i}>
-            <h2 className="text-7xl font-black mb-8 uppercase italic">{res.brand}</h2>
-            
-            <div className="flex gap-3 mb-12">
-              {['All', 'Misleading', 'Gameplay', 'UGC', 'Cinematic'].map(c => (
-                <button key={c} onClick={() => setActiveFilter(c)} className={`px-6 py-2 rounded-full text-[10px] font-black uppercase border ${activeFilter === c ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
-                  {c}
-                </button>
-              ))}
-            </div>
+        const gStart = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
+          method: 'POST',
+          headers: {
+            'X-Goog-Upload-Protocol': 'resumable',
+            'X-Goog-Upload-Command': 'start',
+            'X-Goog-Upload-Header-Content-Type': 'video/mp4',
+            'X-Goog-Upload-Header-Content-Length': uint8.byteLength.toString(),
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ file: { display_name: `id_${adId}` } }) 
+        });
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
-              <div className="lg:col-span-7 bg-slate-900/40 border border-slate-800 p-10 rounded-[3.5rem]">
-                <div className="prose prose-invert max-w-none text-slate-300 mb-10">
-                  <ReactMarkdown>{res.strategy}</ReactMarkdown>
-                </div>
-                <button onClick={() => handleGenerateScript(res.brand, res.strategy)} className="w-full bg-blue-600 py-5 rounded-3xl font-black uppercase text-xs">
-                  {scriptLoading ? 'Writing...' : '🪄 Generate Script'}
-                </button>
-                {generatedScript && (
-                  <div className="mt-8 p-8 bg-blue-900/20 rounded-3xl border border-blue-500/20 prose prose-invert max-w-none">
-                    <ReactMarkdown>{generatedScript}</ReactMarkdown>
-                  </div>
-                )}
-              </div>
+        const uploadUrl = gStart.headers.get('x-goog-upload-url');
+        if (uploadUrl) {
+          await fetch(uploadUrl, { method: 'POST', headers: { 'X-Goog-Upload-Offset': '0', 'X-Goog-Upload-Command': 'upload, finalize' }, body: uint8 });
+          googleFileUris.push({ uri: `https://generativelanguage.googleapis.com/v1beta/files/id_${adId}`, id: adId });
+        }
 
-              <div className="lg:col-span-5 grid grid-cols-2 gap-4 h-fit">
-                {res.creatives
-                  .filter((ad: any) => activeFilter === 'All' || ad.concept === activeFilter)
-                  .map((ad: any) => (
-                  <div key={ad.id} className="aspect-[9/16] bg-black rounded-[2rem] overflow-hidden border border-slate-800 relative">
-                    <video src={ad.video} poster={ad.thumbnail} controls className="h-full w-full object-cover" />
-                    <div className="absolute top-2 left-2 bg-blue-600 text-[8px] font-black uppercase px-2 py-1 rounded-full">{ad.concept}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+        const fileName = `vid_${adId}.mp4`;
+        await supabase.storage.from('ads_videos').upload(fileName, uint8, { contentType: 'video/mp4', upsert: true });
+        
+        processedCreatives.push({ 
+          id: adId, 
+          video: supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl, 
+          thumbnail: ad.snapshot?.videos?.[0]?.video_preview_image_url || "",
+          concept: 'Gameplay'
+        });
+      } catch (e) { console.error("Upload error:", e); }
+    }
+
+    if (googleFileUris.length > 0) await new Promise(r => setTimeout(r, 15000));
+
+    // 3. Анализ (Используем стабильную модель gemini-1.5-flash)
+    let finalStrategy = "No text returned.";
+    if (googleFileUris.length > 0) {
+      const promptParts = [
+        { text: "ACT AS A SENIOR UA LEAD. Analyze these 10 ads. Group them into Concepts (Misleading, Gameplay, UGC, Cinematic). For each, describe Hook and Trigger. Output in Markdown." },
+        ...googleFileUris.map(f => ({ file_data: { mime_type: "video/mp4", file_uri: f.uri } }))
+      ];
+
+      const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          contents: [{ parts: promptParts }],
+          safetySettings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }] 
+        })
+      });
+      const gData = await geminiRes.json();
+      finalStrategy = gData.candidates?.[0]?.content?.parts?.[0]?.text || "No text returned.";
+
+      // Простое тегирование для работы фильтров
+      processedCreatives.forEach(ad => {
+        if (finalStrategy.toLowerCase().includes('misleading')) ad.concept = 'Misleading';
+        else if (finalStrategy.toLowerCase().includes('ugc')) ad.concept = 'UGC';
+        else if (finalStrategy.toLowerCase().includes('cinematic')) ad.concept = 'Cinematic';
+      });
+    }
+
+    const brandName = data[0]?.snapshot?.page_name || "Brand";
+    await supabase.from('ads_library').insert([{ 
+      page_id: pageId, 
+      brand_name: brandName, 
+      strategy_analysis: finalStrategy, 
+      creatives: processedCreatives 
+    }]);
+
+    return NextResponse.json({ brand: brandName, strategy: finalStrategy, creatives: processedCreatives });
+  } catch (e: any) { 
+    return NextResponse.json({ error: e.message }, { status: 500 }); 
+  }
 }
