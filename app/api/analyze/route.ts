@@ -15,13 +15,15 @@ export async function POST(req: Request) {
     const token = process.env.APIFY_TOKEN;
     
     // ТЕПЕРЬ БЕРЕМ ИЗ VERCEL, А НЕ ИЗ ТЕКСТА
-    const geminiKey = process.env.NEW_TOTAL_SECRET_KEY;
+    const geminiKey = process.env.NEW_TOTAL_SECRET_KEY; 
 
     if (!geminiKey) {
-       console.error(">>> [CRITICAL] GEMINI_API_KEY is missing in Vercel Env Vars!");
+       // ИСПРАВЛЕНО: Теперь лог пишет правду про имя переменной
+       console.error(">>> [CRITICAL] NEW_TOTAL_SECRET_KEY is missing in Vercel Env Vars!");
        throw new Error("API Key configuration error");
     }
     
+    // ИСПРАВЛЕНО: Убран дубликат (было объявлено дважды)
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
