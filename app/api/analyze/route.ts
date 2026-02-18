@@ -12,7 +12,7 @@ export async function POST(req: Request) {
     const idMatch = url.match(/\d{10,}/);
     const pageId = idMatch ? idMatch[0] : url;
 
-    // 1. Скрапинг
+    // 1. Скрапинг ТОП-10
     const apifyRes = await fetch(`https://api.apify.com/v2/acts/curious_coder~facebook-ads-library-scraper/run-sync-get-dataset-items?token=${token}&timeout=60&maxChargedResults=10`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     const processedCreatives = [];
     const googleFileUris = [];
 
-    // 2. Загрузка (Google + Supabase)
+    // 2. Загрузка всех видео
     for (const ad of data.slice(0, 10)) {
       const adId = ad.ad_archive_id;
       const videoUrl = ad.snapshot?.videos?.[0]?.video_hd_url || ad.snapshot?.videos?.[0]?.video_sd_url;
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
         const gStart = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${geminiKey}`, {
           method: 'POST',
           headers: { 'X-Goog-Upload-Protocol': 'resumable', 'X-Goog-Upload-Command': 'start', 'X-Goog-Upload-Header-Content-Type': 'video/mp4', 'X-Goog-Upload-Header-Content-Length': uint8.byteLength.toString(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file: { display_name: `id_${adId}` } }) // ID в имени для ИИ
+          body: JSON.stringify({ file: { display_name: `id_${adId}` } }) 
         });
 
         const uploadUrl = gStart.headers.get('x-goog-upload-url');
@@ -53,28 +53,25 @@ export async function POST(req: Request) {
           id: adId, 
           video: supabase.storage.from('ads_videos').getPublicUrl(fileName).data.publicUrl, 
           thumbnail: ad.snapshot?.videos?.[0]?.video_preview_image_url || "",
-          concept: 'All' // По умолчанию
+          concept: 'All' // Фолбек
         });
       } catch (e) { console.error(`Err: ${adId}`); }
     }
 
-    // 3. Ждем готовности
-    if (googleFileUris.length > 0) {
-      await new Promise(r => setTimeout(r, 15000));
-    }
-
-    // 4. Анализ с ТЕГИРОВАНИЕМ
+    // 3. Анализ в Gemini 3 Flash с тегированием
     let finalStrategy = "Analysis failed.";
     if (googleFileUris.length > 0) {
+      await new Promise(r => setTimeout(r, 15000)); // Ждем индексации
+
       const promptParts: any[] = [
-        { text: `INSTRUCTION: Analyze these videos. 
-          1. Create a Strategic Report in Markdown.
-          2. Group them into Concepts: Misleading, Gameplay, UGC, or Cinematic.
+        { text: `INSTRUCTION: You are a Senior UA Lead. Analyze these 10 videos.
+          1. Group them into 2-4 Concepts: Misleading, Gameplay, UGC, or Cinematic.
+          2. Provide a Strategic Report in Markdown.
           3. IMPORTANT: At the very end of your response, provide a JSON mapping exactly like this:
           TAGS_START
           [{"id": "video_id", "concept": "ConceptName"}]
           TAGS_END
-          Use the actual Ad IDs provided in the file names.` }
+          Use the actual Ad IDs from the file names (e.g. id_4123456). ConceptName must be one of: Misleading, Gameplay, UGC, Cinematic.` }
       ];
       googleFileUris.forEach(f => promptParts.push({ file_data: { mime_type: "video/mp4", file_uri: f.uri } }));
 
@@ -87,21 +84,17 @@ export async function POST(req: Request) {
       const gData = await geminiRes.json();
       const rawText = gData.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-      // Вытаскиваем JSON теги из текста
+      // ПАРСИНГ ТЕГОВ
       const jsonMatch = rawText.match(/TAGS_START([\s\S]*?)TAGS_END/);
       if (jsonMatch) {
         try {
           const tags = JSON.parse(jsonMatch[1].trim());
-          // Присваиваем концепты нашим видео
           processedCreatives.forEach(ad => {
             const tag = tags.find((t: any) => t.id.includes(ad.id));
             if (tag) ad.concept = tag.concept;
           });
-          // Очищаем основной текст от JSON-блока для красоты
           finalStrategy = rawText.replace(/TAGS_START[\s\S]*?TAGS_END/, "").trim();
-        } catch (e) { 
-          finalStrategy = rawText; 
-        }
+        } catch (e) { finalStrategy = rawText; }
       } else {
         finalStrategy = rawText;
       }
