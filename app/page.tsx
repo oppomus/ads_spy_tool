@@ -9,6 +9,10 @@ export default function VibeSpyMain() {
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeFilter, setActiveFilter] = useState('All');
+  
+  // Состояния для сценария
+  const [scriptLoading, setScriptLoading] = useState(false);
+  const [generatedScript, setGeneratedScript] = useState('');
 
   const handleAnalyze = async () => {
     if (!input) return alert("Please enter a Page ID");
@@ -19,9 +23,7 @@ export default function VibeSpyMain() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: input }),
       });
-      
       const data = await res.json();
-      
       if (res.ok) {
         setResults([data, ...results]);
       } else {
@@ -33,10 +35,30 @@ export default function VibeSpyMain() {
     setLoading(false);
   };
 
+  const handleGenerateScript = async (brandName: string, strategyText: string) => {
+    setScriptLoading(true);
+    setGeneratedScript('');
+    try {
+      const res = await fetch('/api/generate-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand: brandName, strategy: strategyText }),
+      });
+      const data = await res.json();
+      if (data.script) {
+        setGeneratedScript(data.script);
+      }
+    } catch (e) {
+      alert("Script generation failed.");
+    }
+    setScriptLoading(false);
+  };
+
   const concepts = ['All', 'Misleading', 'Gameplay', 'UGC', 'Cinematic'];
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-100 p-8 font-sans">
+    <div className="min-h-screen bg-[#020617] text-slate-100 p-8 font-sans pb-40">
+      {/* HEADER */}
       <div className="max-w-7xl mx-auto flex justify-between items-center mb-16 border-b border-slate-800 pb-8">
         <div>
           <h1 className="text-4xl font-black italic uppercase text-blue-500 tracking-tighter">Spy Pro 2.0</h1>
@@ -55,13 +77,14 @@ export default function VibeSpyMain() {
           <button 
             onClick={handleAnalyze} 
             disabled={loading} 
-            className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 px-10 py-3 rounded-2xl font-black uppercase text-xs transition-all"
+            className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 px-10 py-3 rounded-2xl font-black uppercase text-xs transition-all shadow-lg shadow-blue-900/20"
           >
             {loading ? 'Crunching Video...' : 'Spy Now'}
           </button>
         </div>
       </div>
 
+      {/* RESULTS */}
       <div className="max-w-7xl mx-auto space-y-24">
         {results.length === 0 && !loading && (
           <div className="text-center py-40 opacity-10 uppercase font-black text-6xl select-none tracking-tighter">
@@ -82,8 +105,8 @@ export default function VibeSpyMain() {
                   onClick={() => setActiveFilter(c)}
                   className={`px-6 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all border ${
                     activeFilter === c 
-                    ? 'bg-blue-600 border-blue-500 text-white' 
-                    : 'bg-slate-900 border-slate-800 text-slate-500'
+                    ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/40' 
+                    : 'bg-slate-900 border-slate-800 text-slate-500 hover:border-slate-700'
                   }`}
                 >
                   {c}
@@ -92,17 +115,27 @@ export default function VibeSpyMain() {
             </div>
             
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
-              <div className="lg:col-span-7 bg-slate-900/40 border border-slate-800 p-10 rounded-[3.5rem] backdrop-blur-md">
-                <div className="prose prose-invert max-w-none text-slate-300 font-sans">
-                  <ReactMarkdown
-                    components={{
-                      h3: ({...props}) => <h3 className="text-xl font-bold text-blue-400 mt-8 mb-4 uppercase" {...props} />,
-                      li: ({...props}) => <li className="mb-2 list-disc ml-4 text-slate-400" {...props} />,
-                      strong: ({...props}) => <b className="text-white font-black" {...props} />,
-                    }}
+              <div className="lg:col-span-7 space-y-6">
+                <div className="bg-slate-900/40 border border-slate-800 p-10 rounded-[3.5rem] backdrop-blur-md shadow-2xl border-t-blue-500/20">
+                  <div className="prose prose-invert max-w-none text-slate-300 font-sans">
+                    <ReactMarkdown
+                      components={{
+                        h3: ({...props}) => <h3 className="text-xl font-bold text-blue-400 mt-8 mb-4 uppercase tracking-tight" {...props} />,
+                        li: ({...props}) => <li className="mb-2 list-disc ml-4 text-slate-400" {...props} />,
+                        strong: ({...props}) => <b className="text-white font-black" {...props} />,
+                      }}
+                    >
+                      {res.strategy}
+                    </ReactMarkdown>
+                  </div>
+
+                  <button 
+                    onClick={() => handleGenerateScript(res.brand, res.strategy)}
+                    disabled={scriptLoading}
+                    className="mt-10 w-full bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-black uppercase text-xs py-5 rounded-3xl transition-all active:scale-[0.98] shadow-xl shadow-blue-900/20 flex items-center justify-center gap-3 disabled:opacity-50"
                   >
-                    {res.strategy}
-                  </ReactMarkdown>
+                    {scriptLoading ? '🪄 Writing Script...' : '🪄 Generate New Ad Script'}
+                  </button>
                 </div>
               </div>
 
@@ -110,19 +143,35 @@ export default function VibeSpyMain() {
                 {res.creatives
                   ?.filter((ad: any) => activeFilter === 'All' || ad.concept === activeFilter)
                   .map((ad: any) => (
-                  <div key={ad.id} className="aspect-[9/16] bg-black rounded-[2.5rem] overflow-hidden border border-slate-800 relative group">
+                  <div key={ad.id} className="aspect-[9/16] bg-black rounded-[2.5rem] overflow-hidden border border-slate-800 shadow-xl group relative">
                     {ad.video ? (
-                      <video src={ad.video} poster={ad.thumbnail} controls className="h-full w-full object-cover transition-transform group-hover:scale-110" />
+                      <video src={ad.video} poster={ad.thumbnail} controls className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-110" />
                     ) : (
-                      <div className="flex flex-col items-center justify-center h-full bg-slate-900/50 p-4">
+                      <div className="flex flex-col items-center justify-center h-full bg-slate-900/50 p-4 text-center">
                         <img src={ad.thumbnail} className="opacity-20 mb-2 w-16 grayscale" alt="Thumb" />
-                        <span className="text-[8px] font-black uppercase opacity-30">Processing Media</span>
+                        <span className="text-[8px] font-black uppercase opacity-30 italic leading-tight">Processing Media</span>
                       </div>
                     )}
                   </div>
                 ))}
               </div>
             </div>
+
+            {/* SCRIPT DISPLAY BLOCK */}
+            {generatedScript && (
+              <div id="script-target" className="mt-12 bg-blue-900/20 border-2 border-blue-500/30 p-10 rounded-[3rem] animate-in zoom-in-95 duration-500">
+                <div className="flex items-center gap-4 mb-6">
+                  <span className="text-3xl">📝</span>
+                  <h2 className="text-3xl font-black uppercase italic text-white tracking-tighter">Generated Ad Script</h2>
+                </div>
+                <div className="prose prose-invert max-w-none prose-table:border prose-table:border-slate-700 prose-td:p-4 prose-th:bg-slate-800">
+                  <ReactMarkdown>{generatedScript}</ReactMarkdown>
+                </div>
+                <button onClick={() => setGeneratedScript('')} className="mt-8 text-slate-500 text-[10px] font-black uppercase tracking-widest hover:text-white transition-colors">
+                  [ Close Script ]
+                </button>
+              </div>
+            )}
           </div>
         ))}
       </div>
